@@ -120,6 +120,51 @@ Eagle 的 Chrome 扩展「批量收藏」读的是页面上 `<img>` 当前的 `s
 
 ---
 
+## 素材命名（送进 Eagle 的文件名）
+
+**为什么要有这个**：Eagle 的加素材接口如果没拿到 `name`，就会**用素材 id 当文件名**（`MUMT12OZPMAVP` 这种）。
+那种名字在库里完全没法搜、也没法看，等于把图片的上下文全丢了。
+
+脚本默认 `nameTemplate: '{basename}'` —— **取原图 URL 的最后一段（去掉扩展名）**。效果：
+
+| 站点 | 原图 URL 尾段 | 送进 Eagle 的名字 |
+|---|---|---|
+| eporner | `10574489-gao-qiaoshou-zi-san-nude.jpg` | `10574489-gao-qiaoshou-zi-san-nude` |
+| Pinterest | `abcdef0123456789.jpg` | `Shoko Takahashi, Yua Mikami - Meganekko … - Eporner-03` |
+
+eporner 那条直接带上了站点的拼音 slug，正是「附带关键信息、方便搜索」想要的。
+
+**弱名兜底。** Pinterest 这类 CDN 的尾段是一串哈希，当名字毫无意义。所以脚本会判定「弱名」并改用兜底模板：
+
+- 长度 < 3；或是 `image` / `img` / `photo` / `untitled` / `download` / `thumb` / `large` / `original` … （一整张保留字表）
+- 或纯十六进制且 ≥ 12 位（`abcdef0123456789`）
+- 或**一个字母都没有**（纯数字 / 纯下划线 / 纯横线）
+
+命中就退化成 `{page}-{alt}-{host}` 里第一个有值的，再加两位序号（`… - Eporner-03`）。
+序号补齐到两位是为了排序好看 —— 不补的话按名字排序 `-10` 会排在 `-2` 前面。
+
+**模板占位符**（设置面板里改，填错/填空都会回落到默认）：
+
+| 占位符 | 含义 |
+|---|---|
+| `{basename}` | 原图 URL 尾段去扩展名（默认） |
+| `{alt}` | 缩略图的 `alt`，没有就取 `title` |
+| `{page}` | 页面 `<title>` 清洗后的结果 |
+| `{host}` | 网站域名 |
+| `{id}` | 规则采集到的条目 id（如 `data-photo-id`） |
+| `{n}` | 本页序号，两位补零 |
+
+例如 `{page}-{n}` 会把整页统一命名成「页面标题-01、-02…」。
+
+> 两条硬保证：**名字永远不为空**（空串就等于 Eagle 又拿 id 当文件名了），
+> 以及非法文件名字符 `<>:"/\|?*` 与控制字符一律清掉、折叠空白、截 120 字。
+
+> 🧠 「Eagle 认不认 `name`」这事是**实测**过的，不是照文档猜的：手工 `POST /api/v2/item/add`
+> 传 `name: 'EBC-NAMETEST-d4c7fad5'`，`GET /api/v2/item/get` 读回来一模一样。
+> 所以文件名不对是纯客户端问题，改脚本即可。
+
+---
+
 ## 规则表格式
 
 ```jsonc
@@ -270,10 +315,16 @@ CI（`.github/workflows/ci.yml`）会在每次 push / PR 上重跑这四步。**
 
 ```bash
 node tests/validate-rules.mjs    # 规则表结构校验
-node tests/resolve-harness.mjs   # 解析器回归：假 DOM，40 项断言
+node tests/resolve-harness.mjs   # 解析器回归：假 DOM，65 项断言
 node tests/scroll-harness.mjs    # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
 node tests/live-eporner.mjs      # 真实站点端到端：需要能访问 eporner
+node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
 ```
+
+> `live-naming.mjs` **不进 CI** —— 它要连本机的 Eagle。但它是唯一能证明「Eagle 真的按我们算的名字存下来」的东西，
+> 动过命名逻辑（`nameTemplate` / `buildItemName` / 弱名表）就手动跑一次。
+> 它分两层验证，因为这两件事失败起来长得很不一样：① 从网络替身抓下**原始请求体**，看 `name` 是不是本地算的那个；
+> ② 再 `item/get` 读回来比对（**带重试** —— Eagle 建好素材不等于立刻可查）。
 
 覆盖的事故与守卫：
 
@@ -290,6 +341,9 @@ node tests/live-eporner.mjs      # 真实站点端到端：需要能访问 eporn
 | 7 | **正例**：显式 `allowDocument: true` 且同目录时，兜底仍然可用 |
 | 8 | **负例**：`allowDocument: true` 但跨目录，仍必须拒绝 |
 | 9 | 按 URL 去重：106 个条目 → 85 张待发，21 个重复被拦下 |
+| 10 | **素材名**：`baseNameOfUrl` 从 URL 尾段取名字，弱名判定真值表（纯哈希 / 纯数字 / 保留字）逐条过 |
+| 11 | **素材名**：Pinterest 那串哈希触发标题兜底；`{n}` 补两位；**任何情况下 `buildItemName` 都不返回空串** |
+| 12 | **素材名**：`collectItems` 真的把 `alt` 采集进来了（兜底的原料） |
 
 `live-eporner.mjs` 用**脚本自己的 `buildEndpointIndex`** 处理真实响应，2026-09-29 实测：
 
@@ -357,5 +411,8 @@ Eagle 的图重推一遍**，在素材库里堆出重复。现在重扫时命中
 | 「替换页面图片」只换掉了首屏那十几张 | 同上的虚拟化原因：那一刻 DOM 里**只有**那十几张。旧实现还额外用了 `thumb` 对齐，而重挂载后同一个 pin 的 `thumb` 常常换成另一个尺寸的候选地址，于是连那十几张都可能对不上。现在改为按**稳定 key**（详情页链接去掉 query/hash）对齐，并且「跟随滚动」模式下**边滚边换**。见 `tests/scroll-harness.mjs` 断言 7、8。 |
 | 日志说「N 个 tile 指向同一张原图」 | 不是 bug。Pinterest 的推荐流会把同一个 pin 推好几次，页面上就有几个 tile 指向同一张原图。脚本按 URL 去重后再推送，重复项会被标成「重复，已跳过」；本地替换为了保持所见即所得仍然照换，挑图时留意即可。 |
 | 页面上明明有几百条，推送却只发了一部分 | 看推送日志里的 `（已按 URL 去重）`：条目数常多于实际照片数（实测 eporner 106 条 → 85 张）。 |
+| 送进 Eagle 的文件名全是 `MUMT12OZPMAVP` 这种 | 那是**素材 id** —— 说明发出去的 `name` 是空串。实测确认 `POST /api/v2/item/add` 是认 `name` 的（传什么读回来就是什么），所以这是纯客户端问题。检查设置里的「素材命名模板」是不是被清空了；模板填空会回落到默认的 `{basename}`。见上面的「素材命名」。 |
+| 名字是 `image-01` / `3_small` 这种没信息量的 | 原图 URL 尾段本身就是弱名（哈希、纯数字、保留字），触发了兜底。想更可读就把模板改成 `{page}-{n}` 或 `{alt}` —— 弱名兜底时会优先取 `{page}`/`{alt}`。 |
+| 推了 N 条，Eagle 里却只有 N-1 条 | **Eagle 不会留下下载失败的原图。** 实测：给一条 404 的地址，Eagle 照常返回一个素材 id，但 `item/get` 重试 20 秒仍是 `total: 0`。所以「少了一条」多半是那条原图挂了（防盗链 / 已删除），不是脚本漏发。脚本推送日志里的 `ok=N failed=0` 反映的是 HTTP 层面，不代表 Eagle 下载成功。 |
 | 升级了脚本，却一直收不到规则更新 | 老版本的 GM 存储里存着一份 `subscriptionUrl: ''`，而 `Object.assign({}, DEFAULT_SETTINGS, stored)` 会让存下来的旧值**盖掉新默认值** —— 而且这个失败是完全静默的（日志只会说「未配置订阅地址，使用内置规则」）。现在 `subscriptionUrlOf()` 把空字符串归一化成官方订阅表，设置页里显示的就是**实际生效**的地址；想彻底只用内置规则（离线 / 内网），把那一栏明确填成 `none`。`tests/resolve-harness.mjs` 有 10 条断言盯着这个行为。 |
 | Tampermonkey 里出现了两份同名脚本 | 脚本身份是 `@name` + `@namespace` 的组合。本仓库沿用了最初的 `namespace: eagle-batch-collector`，所以从旧版升级是**原地更新、设置不丢**；如果你手动改过 `@namespace`，Tampermonkey 会当成另一个脚本装第二份，删掉多余的那份即可。 |

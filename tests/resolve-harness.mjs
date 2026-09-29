@@ -274,5 +274,95 @@ console.log('\n== 9. 按 URL 去重（106 个条目 → 85 张照片 的那个�
   EBC.settings.subscriptionUrl = saved;
 }
 
+// ============================================================
+// 【素材名】送进 Eagle 的 name 必须有信息量
+// ============================================================
+// 用户反馈：「发送到 eagle 之后，文件名都是同样的 MUMT12OZPMAVP，完全没有任何意义」。
+// 实测 `POST /api/v2/item/add` 是认 name 的（传 'xxx' 读回来就是 'xxx'），所以这是
+// 纯客户端问题 —— 脚本一直传空字符串，Eagle 就退化成拿素材 id 当名字。
+{
+  const savedTpl = EBC.settings.nameTemplate;
+  const savedTitle = sandbox.document.title;
+  const SLUG = '10574489-gao-qiaoshou-zi-san-nude';
+  const PAGE = 'Shoko Takahashi ... - Eporner';
+
+  ok('eporner 原图 URL 取出拼音 slug（这才是能在库里搜到的词）',
+    EBC.baseNameOfUrl(origOf(IDS[0])) === SLUG, EBC.baseNameOfUrl(origOf(IDS[0])));
+  ok('缩略图的 basename 是 id+尺寸 —— 所以名字必须从**原图**地址取，不能从缩略图取',
+    EBC.baseNameOfUrl(thumbOf(IDS[0])) === '10574489-10574489_296x1000',
+    EBC.baseNameOfUrl(thumbOf(IDS[0])));
+  ok('query / hash 不影响 basename',
+    EBC.baseNameOfUrl(origOf(IDS[0]) + '?v=2#x') === SLUG, EBC.baseNameOfUrl(origOf(IDS[0]) + '?v=2#x'));
+  ok('URL 编码的 basename 会被解码',
+    EBC.baseNameOfUrl('https://x.test/a/%E4%B8%AD%E6%96%87.jpg') === '中文',
+    EBC.baseNameOfUrl('https://x.test/a/%E4%B8%AD%E6%96%87.jpg'));
+
+  // isWeakBase 真值表：命中的名字进库等于没名字，必须换来源
+  ok('纯哈希算弱名（Pinterest 就是 originals/ab/cd/ab12…）', EBC.isWeakBase('abcdef0123456789') === true);
+  ok('纯数字算弱名', EBC.isWeakBase('10574489') === true);
+  ok('image / photo 这类通用名算弱名', EBC.isWeakBase('image') === true && EBC.isWeakBase('photo') === true);
+  ok('太短算弱名', EBC.isWeakBase('a1') === true);
+  ok('一个字母都没有算弱名', EBC.isWeakBase('123-456') === true);
+  ok('人写的 slug 不算弱名', EBC.isWeakBase(SLUG) === false);
+  ok('中文文件名不算弱名', EBC.isWeakBase('风景照片') === false);
+
+  // sanitizeName：素材名会进 UI 和搜索，也可能被导出成文件名
+  ok('斜杠/冒号/星号被清掉', EBC.sanitizeName('a/b:c*d?e') === 'a b c d e', EBC.sanitizeName('a/b:c*d?e'));
+  ok('控制字符被清掉', EBC.sanitizeName('a\u0000b\nc') === 'a b c', EBC.sanitizeName('a\u0000b\nc'));
+  ok('首尾的点和空格被裁掉', EBC.sanitizeName('  ..a..  ') === 'a', EBC.sanitizeName('  ..a..  '));
+  ok('超长名被截断（不会塞爆 Eagle 的字段）', EBC.sanitizeName('x'.repeat(500)).length <= 120);
+
+  // 默认模板 = {basename}，正是用户想要的「原图文件名」
+  EBC.settings.nameTemplate = '{basename}';
+  sandbox.document.title = PAGE;
+  ok('默认模板取到原图 slug',
+    EBC.buildItemName({ alt: '' }, origOf(IDS[0]), 0) === SLUG,
+    EBC.buildItemName({ alt: '' }, origOf(IDS[0]), 0));
+
+  // ★ 核心 1：弱名必须兜底
+  const PIN_HASH = 'https://i.pinimg.com/originals/ab/cd/ef/abcdef0123456789abcdef0123456789.jpg';
+  const pinName = EBC.buildItemName({ alt: '' }, PIN_HASH, 2);
+  ok('Pinterest 的哈希 basename 触发兜底（名字里不再只剩那串哈希）',
+    pinName.indexOf('abcdef0123456789') < 0, pinName);
+  ok('兜底改用页面标题', pinName.indexOf('Shoko Takahashi') === 0, pinName);
+  ok('兜底带序号（{n} 从 1 开始，index 2 → 03）', /-03$/.test(pinName), pinName);
+  ok('同一页的相邻条目名字互不相同',
+    EBC.buildItemName({}, PIN_HASH, 0) !== EBC.buildItemName({}, PIN_HASH, 1));
+
+  // ★ 核心 2：永不返回空串。空串 = Eagle 拿素材 id 命名 = 用户看到的那串乱码。
+  ok('URL 完全拿不到时也不返回空串',
+    EBC.buildItemName({}, '', 0).length > 0, JSON.stringify(EBC.buildItemName({}, '', 0)));
+  sandbox.document.title = '';
+  const altName = EBC.buildItemName({ alt: 'Sunset over the bay' }, PIN_HASH, 0);
+  ok('页面标题也没有时用图片说明兜底', altName.indexOf('Sunset over the bay') === 0, altName);
+  sandbox.document.title = PAGE;
+
+  // 模板可自定义
+  EBC.settings.nameTemplate = '{page}-{n}';
+  ok('自定义模板 {page}-{n} 生效（index 4 → 05）',
+    EBC.buildItemName({}, origOf(IDS[0]), 4) === PAGE + '-05',
+    EBC.buildItemName({}, origOf(IDS[0]), 4));
+
+  // 用户把模板设成空 → 回落默认，仍然不允许出现空名
+  EBC.settings.nameTemplate = '';
+  ok('模板留空时回落 {basename}',
+    EBC.buildItemName({}, origOf(IDS[0]), 0) === SLUG,
+    EBC.buildItemName({}, origOf(IDS[0]), 0));
+
+  // ★ 核心 3：真正被抓进 item 的 alt 也要能被用到（collectItems 必须采集它）
+  {
+    const page = makePage({ itemHasDataSrc: true });
+    page.anchors[0].children[0].setAttribute('alt', 'Photos of Shoko');
+    usePage(page);
+    const items = EBC.collectItems(EPORNER);
+    ok('collectItems 采集了 img 的 alt（否者 alt 兜底永远是空的）',
+      items.length > 0 && items[0].alt === 'Photos of Shoko',
+      JSON.stringify(items[0] && items[0].alt));
+  }
+
+  EBC.settings.nameTemplate = savedTpl;
+  sandbox.document.title = savedTitle;
+}
+
 console.log(`\n${failed ? '❌' : '✅'} ${failed ? failed + ' 项失败' : '全部通过'}\n`);
 process.exit(failed ? 1 : 0);

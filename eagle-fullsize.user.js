@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -71,6 +71,19 @@
     autoReplace: true,
     // 上面那个「停下来就收一遍」的防抖：滚动停下多久才做一次。
     followDebounceMs: 700,
+    // 送 Eagle 时的素材名。Eagle 的 POST /api/v2/item/add **认 name**（已实测：
+    // 传什么读回什么）；传空字符串时 Eagle 会拿素材 id 当名字，于是库里全是
+    // MUMT12OZPMAVP 这种没法搜的东西 —— 这个需求就是用户提的。
+    // 可用占位符：
+    //   {basename} 原图 URL 的文件名（去扩展名）—— eporner 那种拼音 slug 最有信息量
+    //   {alt}      图片的 alt / title 文本
+    //   {page}     页面标题
+    //   {host}     原图域名
+    //   {id}       条目 id（规则从 data-* 读到的）
+    //   {n}        本条在本次结果里的序号
+    // 渲染结果为空、或结果本身没有信息量（纯哈希 / 纯数字 / image、photo 这种通用名）
+    // 时自动兜底成「页面标题-序号」，**绝不返回空串**。
+    nameTemplate: '{basename}',
   };
 
   // 内置默认规则表（离线可用）。远程订阅会按 id 覆盖它。
@@ -336,8 +349,86 @@
    * 4. 从列表页采集「条目」
    * ============================================================ */
 
+  /* ------------------------------------------------------------
+   * 4.0 素材命名
+   *
+   * 用户反馈：送进 Eagle 之后文件名全是 `MUMT12OZPMAVP` 这种，毫无信息量，
+   * 没法在库里搜。原因不是 Eagle 的问题 —— 实测 `POST /api/v2/item/add`
+   * 传 `name: 'xxx'`，`item/get` 读回来就是 `xxx`；是**本脚本一直传空字符串**，
+   * 于是 Eagle 退化成拿素材 id 当名字。
+   *
+   * 这里从**原图地址**派生一个有意义的素材名。难点是「原图地址里根本没有
+   * 有意义的文件名」这种情况真实存在：
+   *   - Pinterest 的 i.pinimg.com 是 `.../originals/ab/cd/ef/abcdef0…jpg`，纯哈希；
+   *   - 有些站直接是 `image_1.jpg`、`photo.jpg`。
+   * 这种名字塞进库里还是搜不到，所以命中「无意义」判据时改用页面标题兜底。
+   * ------------------------------------------------------------ */
+
+  // Eagle 素材名会进 UI、进搜索，也可能被导出成文件名 —— 清掉路径分隔符与控制字符。
+  function sanitizeName(s) {
+    return String(s == null ? '' : s)
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/[<>:"/\\|?*]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/^[.\s]+|[.\s]+$/g, '')
+      .slice(0, 120)
+      .trim();
+  }
+
+  // 原图 URL 的 basename（去掉扩展名，URL 解码）。拿不到返回 ''。
+  function baseNameOfUrl(url) {
+    try {
+      const u = new URL(url, location.href);
+      let last = u.pathname.split('/').filter(Boolean).pop() || '';
+      try { last = decodeURIComponent(last); } catch (e) {}
+      return last.replace(/\.[a-z0-9]{1,5}$/i, '');
+    } catch (e) {}
+    return '';
+  }
+
+  // 「这个 basename 本身就没有信息量」——命中就换别的来源。
+  const WEAK_BASE_RE =
+    /^(image|img|photo|picture|pic|untitled|download|blob|preview|thumb|thumbnail|large|original|default|placeholder|asset|file|\d+|_+|-+)$/i;
+  function isWeakBase(name) {
+    const s = String(name == null ? '' : name).trim();
+    if (s.length < 3) return true;
+    if (WEAK_BASE_RE.test(s)) return true;
+    if (/^[0-9a-f]{12,}$/i.test(s)) return true;      // Pinterest 那样的纯哈希
+    if (!/[a-z\u4e00-\u9fa5]/i.test(s)) return true;  // 一个字母都没有
+    return false;
+  }
+
   /**
-   * 返回 [{ el, img, thumb, link, externalId }]
+   * 算出送 Eagle 用的素材名。
+   * 先渲染 nameTemplate；渲染结果为空、或名字没有信息量时自动兜底成
+   * 「页面标题-序号」。**保证永不返回空串** —— 空串就是用户在库里看到的乱码。
+   */
+  function buildItemName(it, url, index) {
+    const n = (index == null ? 0 : index) + 1;
+    const page = sanitizeName(document.title || '');
+    const alt = sanitizeName(it && it.alt ? it.alt : '');
+    const id = it && it.externalId ? String(it.externalId).trim() : '';
+    let host = '';
+    try { host = new URL(url || location.href, location.href).hostname; } catch (e) {}
+    const base = baseNameOfUrl(url);
+
+    // {n} 补齐两位：否则库里按名字排序时空标题的 `-10` 会排在 `-2` 前面
+    const padN = String(n).padStart(2, '0');
+    const vars = { basename: base, alt, page, host, id, n: padN };
+    const rendered = sanitizeName(
+      String(settings.nameTemplate || '{basename}').replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m))
+    );
+
+    // 名字要有信息量：模板渲染为空、或本身就是哈希/纯数字/通用名时，换页面标题。
+    if (!rendered || isWeakBase(rendered)) {
+      const lead = page || alt || host || 'image';
+      return sanitizeName(`${lead}-${padN}`);
+    }
+    return rendered;
+  }
+
+  /**
+   * 返回 [{ el, img, thumb, link, externalId, alt }]
    * thumb = 缩略图当前地址（原图的改写起点）；externalId = 从 DOM 属性读到的条目 id
    */
   function collectItems(rule) {
@@ -373,6 +464,13 @@
       return v || '';
     }
 
+    // img 上的说明文字 —— 原图地址没有有意义文件名时，这是最好的兜底素材名。
+    // （eporner 详情里写的是照片标题，Pinterest 写的是 pin 的描述。）
+    function pickAlt(img) {
+      if (!img || !img.getAttribute) return '';
+      return (img.getAttribute('alt') || img.getAttribute('title') || '').trim();
+    }
+
     function pickLink(el, img) {
       if (c.link === 'self' && el && el.tagName === 'A') return el.href;
       if (c.link && c.link !== 'self') {
@@ -399,7 +497,7 @@
         const key = thumb || externalId || link;
         if (!key || seen.has(key)) continue;
         seen.add(key);
-        out.push({ el, img, thumb, link, externalId });
+        out.push({ el, img, thumb, link, externalId, alt: pickAlt(img) });
       }
       if (out.length) return out;
       // item 选择器没命中就别死心，退化到全页 img
@@ -413,7 +511,7 @@
       const h = img.naturalHeight || img.height || parseInt(img.getAttribute('height') || '0', 10) || 0;
       if ((w && w < 60) || (h && h < 60)) continue;
       seen.add(thumb);
-      out.push({ el: img, img, thumb, link: pickLink(img, img), externalId: '' });
+      out.push({ el: img, img, thumb, link: pickLink(img, img), externalId: '', alt: pickAlt(img) });
     }
     return out;
   }
@@ -598,14 +696,17 @@
         );
         fresh.forEach(([key, it], i) => {
           const r = results[i];
+          const u = r && r.url ? r.url : '';
           const rec = {
-            url: r && r.url ? r.url : '',
+            url: u,
             via: r && r.via ? r.via : '',
             key,
             thumb: it.thumb,
-            name: '',
+            // 素材名从**原图地址**派生，不能用缩略图 —— 缩略图是
+            // `10574489-10574489_296x1000.jpg`，原图才是带 slug 的那个。
+            name: buildItemName(it, u, i),
             website: it.link || location.href,
-            status: r && r.url ? (sentUrls.has(r.url) ? '已发送' : '就绪') : (r && r.error ? r.error : '未解析'),
+            status: u ? (sentUrls.has(u) ? '已发送' : '就绪') : (r && r.error ? r.error : '未解析'),
           };
           resolvedByKey.set(key, rec);
           resolvedCache.push(rec);
@@ -1564,9 +1665,11 @@
 
       // folderId 同时放顶层（旧版 addFromURL(s) 的官方字段）和条目里的 folders 数组
       // （Eagle 插件 SDK 的 addFromPath 用的就是 folders）。Eagle 会忽略多余的字段。
-      const payloadItems = items.map((it) => ({
+      // 兜底：上游没给 name（老缓存、外部调用）时再从原图地址派生一次。
+      // 传空字符串 = Eagle 拿素材 id 当名字 = 库里出现 `MUMT12OZPMAVP` 那种乱码。
+      const payloadItems = items.map((it, i) => ({
         url: it.url,
-        name: it.name || '',
+        name: sanitizeName(it.name) || buildItemName(it, it.url, i),
         website: it.website || location.href,
         tags,
         ...(folderId ? { folders: [folderId] } : {}),
@@ -1770,6 +1873,8 @@
             <select id="s-fold"><option value="">（不指定）</option></select>
             <label>附加标签（逗号分隔）</label>
             <input id="s-tags" placeholder="原图, 收藏">
+            <label>素材名模板（{basename} 原图文件名｜{alt} 图片说明｜{page} 页面标题｜{host} 域名｜{id} 条目 id｜{n} 序号）</label>
+            <input id="s-name" placeholder="{basename}">
             <label>每批条数 / 批次间隔 ms（Eagle 事件循环脆弱，别调太大）</label>
             <input id="s-batch" type="number" min="1" max="50">
             <label>resolve 并发 / 请求间隔 ms</label>
@@ -1862,6 +1967,8 @@
         })(),
         scanMode: $('s-mode').value === 'auto' ? 'auto' : 'follow',
         autoReplace: !!$('s-autorep').checked,
+        // 空模板 = 用默认。不允许存成空字符串，否则素材名会退回 Eagle 的素材 id。
+        nameTemplate: $('s-name').value.trim() || DEFAULT_SETTINGS.nameTemplate,
       });
       eagle.caps = null;
       log('设置已保存。', 'ok');
@@ -2022,6 +2129,7 @@
     sh.getElementById('s-sub').value = subscriptionUrlOf();
     sh.getElementById('s-org').value = settings.eagleOrigin || '';
     sh.getElementById('s-tags').value = settings.tags || '';
+    sh.getElementById('s-name').value = settings.nameTemplate || DEFAULT_SETTINGS.nameTemplate;
     sh.getElementById('s-batch').value = settings.batchSize;
     sh.getElementById('s-conc').value = settings.concurrency;
     sh.getElementById('s-max').value = settings.maxItems;
@@ -2155,16 +2263,18 @@
 
     resolvedCache = results.map((r, i) => {
       const key = itemKey(items[i]);
+      const u = r && r.url ? r.url : '';
       const rec = {
-        url: r && r.url ? r.url : '',
+        url: u,
         via: r && r.via ? r.via : '',
         // key 是「就地替换」能不能对齐回 DOM 的关键：虚拟化会把 tile 卸载再挂载成
         // 新节点，只有 id / 详情页链接这种稳定身份才能把原图认回正确的 tile。
         key,
         thumb: items[i].thumb,
-        name: '',
+        // 素材名派生自**原图地址**（带 slug 的那个），不是缩略图。
+        name: buildItemName(items[i], u, i),
         website: items[i].link || location.href,
-        status: r && r.url ? (sentUrls.has(r.url) ? '已发送' : '就绪') : r && r.error ? r.error : '未解析',
+        status: u ? (sentUrls.has(u) ? '已发送' : '就绪') : r && r.error ? r.error : '未解析',
       };
       if (key) resolvedByKey.set(key, rec);
       return rec;
