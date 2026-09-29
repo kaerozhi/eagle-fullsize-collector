@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "updated": "2026-09-29",
+  "note": "Eagle 大图批量收藏 —— 订阅规则表。维护方式同 AdBlock 列表：一个站点一条规则，删/改/加都只动本文件。resolve 是一个有序管线，逐级降级，第一个产出原图 URL 的环节胜出。",
+  "_schema": {
+    "id": "唯一标识，本地覆盖会按 id 合并",
+    "name": "面板里显示的名字",
+    "enabled": "false 可临时停用",
+    "match": "URL 匹配模式数组，语法同 Tampermonkey @match；* 通配，*.a.com 含裸域",
+    "spa": "true 时用 MutationObserver 跟踪无限滚动新增的图",
+    "referer": "抓详情页/图片时带的 Referer，防盗链站点必填",
+    "concurrency": "detail 策略的并发数，默认 5",
+    "delayMs": "每个 detail 请求之间的间隔，默认 120；站点限流严就加大",
+    "collect": {
+      "item": "「一个条目」的选择器（如详情页链接 / 卡片）。留空则退化为按 img 全页收集",
+      "img": "条目内部的 img 选择器，默认 img",
+      "link": "详情页链接来源：self 表示条目本身就是 <a>；也可写选择器或在条目内找 a[href]",
+      "idAttr": "从条目元素上读条目 id 的属性，写法如 self@data-photo-id。缩略图还没懒加载出来（src 是占位符）时，pagedata 靠它仍能工作",
+      "scrollToLoad": "true 时边走边滚、边滚边收：每滚一屏就把当前 DOM 里的条目合并进累计表（按 id/链接去重）。虚拟化列表页必须开 —— Pinterest 这类瀑布流只挂载视口附近的 tile，滚出视野的会被卸载，所以单次快照永远只有首屏那 ~20 张，而『滚到底再滚回来、最后重收一次』同样拿不到。src 是 1x1 占位图的懒加载页面也靠它"
+    },
+    "resolve": [
+      { "type": "attr", "selectors": ["img@data-full", "img@srcset:last", "img@src"] },
+      { "type": "rewrite", "rules": [{ "re": "正则", "to": "替换（支持 $1）" }] },
+      { "type": "probe", "candidates": [{ "re": "正则", "to": "替换" }] },
+      { "type": "detail", "selectors": ["meta[property='og:image']@content", "img#main-image@src"], "excludeThumb": true }
+    ],
+    "_resolve说明": {
+      "attr": "直接从列表页 DOM 读原图地址（data-* / srcset / JSON）",
+      "rewrite": "对缩略图 URL 做正则改写，纯本地、零请求、最快",
+      "pagedata": "从页面自身的数据里按「同目录 + 同 id」找原图：扒页面源码 + 挂钩 XHR/fetch 抓 viewer 的响应 + 页面上已显示的大图。判据是『同 id 但不带 _WxH 尺寸后缀』。适用于 hash 型页内 viewer，也是 endpoint 失效时的兜底",
+      "endpoint": "【最强】按规则声明的站点接口发一次请求，把响应里所有原图直链挖出来建成 id→原图 索引，每个条目只查表。url 模板用 {变量} 占位，vars 给每个变量的取值来源（按顺序取第一个非空）：'<selector>@<attr>' 从 DOM 读，'url:<正则>' 从当前页 URL 抠。实测 eporner 的 /xhr/gallery-slide/<galleryId> 一次返回整个画廊 85 张的原图直链",
+      "probe": "候选改写逐个用 Image() 实测；只在第一张图上试，定下胜出的候选后整页复用（省流量）",
+      "detail": "并发抓每个条目的详情页取 og:image；不依赖任何 URL 规律，最通用的兜底。若条目链接与当前页同 URL（仅 #hash 不同）会自动跳过，避免重复收藏封面",
+      "excludeThumb": "detail 时排除与缩略图相同的地址，避免把预览图当原图收进来"
+    }
+  },
+  "rules": [
+    {
+      "id": "pinterest",
+      "name": "Pinterest 瀑布流",
+      "enabled": true,
+      "match": [
+        "*://*.pinterest.com/*",
+        "*://*.pinterest.co.uk/*",
+        "*://*.pinterest.de/*",
+        "*://*.pinterest.fr/*",
+        "*://*.pinterest.jp/*",
+        "*://*.pinterest.com.au/*"
+      ],
+      "spa": true,
+      "referer": "https://www.pinterest.com/",
+      "collect": {
+        "item": "div[data-test-id='pin'], div[data-grid-item], div[data-test-id='pin-without-image']",
+        "img": "img",
+        "link": "a[href*='/pin/']",
+        "scrollToLoad": true
+      },
+      "resolve": [
+        { "type": "attr", "selectors": ["img@data-src", "img@srcset:last", "img@src"] },
+        {
+          "type": "rewrite",
+          "rules": [
+            {
+              "re": "//i\\.pinimg\\.com/(?:\\d+x\\d*|originals|\\d+x)/",
+              "to": "//i.pinimg.com/originals/"
+            }
+          ]
+        },
+        {
+          "type": "probe",
+          "candidates": [
+            { "re": "//i\\.pinimg\\.com/(?:\\d+x\\d*|originals|\\d+x)/", "to": "//i.pinimg.com/originals/" },
+            { "re": "//i\\.pinimg\\.com/(?:\\d+x\\d*|originals|\\d+x)/", "to": "//i.pinimg.com/736x/" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "eporner",
+      "name": "Eporner 画廊",
+      "enabled": true,
+      "match": ["*://*.eporner.com/gallery/*", "*://*.eporner.com/photo/*"],
+      "referer": "https://www.eporner.com/",
+      "concurrency": 5,
+      "delayMs": 120,
+      "collect": {
+        "item": "a[data-photo-id]",
+        "img": "img",
+        "link": "self",
+        "idAttr": "self@data-photo-id",
+        "scrollToLoad": true
+      },
+      "_实测结论": "2026-09-29 用真实样例 + 两次 DevTools 取证定型。①缩略图是 <id>-<id>_296x1000.jpg，原图是 <id>-<拼音slug>.jpg，同目录同 id 前缀但后半段无关 → rewrite 原理上不可能。②『点进去』的地址是同一个画廊页的 #gallery-photo=<id> hash，不是独立详情页 → 用 detail 抓回来只会拿到画廊封面（同一张封面重复收藏 N 次），故已移除 detail。③内联脚本里搜不到该 id，初始 HTML 的 129 条图片直链里也只有缩略图 → slug 确实不在页面源码里。④每张缩略图外层是 <a data-photo-id=… data-gallery-id=…>，比 href 匹配可靠，故用它当 collect.item 并作为 id 来源。⑤整页 img 的 src 初值是 1x1 透明 gif 占位符（懒加载），故 scrollToLoad=true。⑥【关键】点开一张大图时抓到 GET /xhr/gallery-slide/<galleryId> 返回 139695 bytes —— 一次请求就带回整个画廊 85 张的全部原图直链。所以正解是 endpoint 策略，一次请求全搞定，不需要逐张点击、也不需要端点回放。",
+      "resolve": [
+        { "type": "attr", "selectors": ["img@data-src", "img@data-original", "img@data-full", "img@srcset:last", "img@src"] },
+        {
+          "type": "endpoint",
+          "url": "/xhr/gallery-slide/{galleryId}",
+          "vars": { "galleryId": ["[data-gallery-id]@data-gallery-id", "url:/gallery/([^/]+)/"] },
+          "idFrom": "([0-9]{6,})"
+        },
+        { "type": "pagedata", "idFrom": "([0-9]{6,})" },
+        { "type": "probe", "candidates": [{ "re": "_\\d+x\\d+\\.jpg$", "to": ".jpg" }] }
+      ]
+    }
+  ]
+}

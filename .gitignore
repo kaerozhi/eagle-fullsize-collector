@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# live-eporner.mjs 是一次性的真实站点取证脚本，跑起来会往这里写采集结果
+tests/live-out/

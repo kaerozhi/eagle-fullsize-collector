@@ -1,0 +1,10 @@
+# 这个仓库的产物是一个会被浏览器 / Tampermonkey / GitHub raw 直接读取的 .user.js 文件，
+# 行尾必须稳定为 LF —— 否则 Windows 上提交一次、别人拉下来就整文件 diff 全红。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary

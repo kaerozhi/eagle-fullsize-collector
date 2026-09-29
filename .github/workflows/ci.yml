@@ -1,0 +1,32 @@
+name: CI
+
+# 这个工作流的核心目的只有一个：让「只改 rules/default.json」这条维护路径
+# 有一个自动守门人。规则表是对外发布的订阅源，一条坏规则会被所有装了脚本的人
+# 在下次启动时拉到（脚本会回退到内置规则，但那个站会静默失效）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 油猴脚本语法检查
+        run: node --check eagle-fullsize.user.js
+
+      - name: 规则表结构校验
+        run: node tests/validate-rules.mjs
+
+      - name: 解析器回归（假 DOM）
+        run: node tests/resolve-harness.mjs
+
+      - name: 无限滚动 + 就地替换回归（假虚拟化瀑布流）
+        run: node tests/scroll-harness.mjs
