@@ -194,15 +194,16 @@ Eagle 的 Chrome 扩展「批量收藏」读的是页面上 `<img>` 当前的 `s
 
 ```bash
 # 1. 改 rules/default.json —— 加一条站点规则，或修一条老规则
-# 2. 本地自检（三条命令，都是毫秒级）
-node tests/validate-rules.mjs     # 结构校验：id 唯一 / match 语法 / resolve 字段齐全 / 正则能编译
-node tests/resolve-harness.mjs    # 解析器语义回归
-node tests/scroll-harness.mjs     # 无限滚动 + 就地替换回归
+# 2. 本地自检（四条命令，都是毫秒级）
+node --check eagle-fullsize.user.js   # 语法
+node tests/validate-rules.mjs         # 结构校验：id 唯一 / match 语法 / resolve 字段齐全 / 正则能编译
+node tests/resolve-harness.mjs        # 解析器语义回归
+node tests/scroll-harness.mjs         # 无限滚动 + 就地替换回归
 # 3. 提交推送
 git commit -am "rules: 新增 xxx 站点" && git push
 ```
 
-CI 会在每次 push / PR 上重跑这四步。**规则表是对外发布的订阅源** —— 一条坏规则会被所有装了脚本的人
+CI（`.github/workflows/ci.yml`）会在每次 push / PR 上重跑这四步。**规则表是对外发布的订阅源** —— 一条坏规则会被所有装了脚本的人
 在下次启动时拉到（脚本会回退到内置规则，但那个站会静默失效），所以这个守门人不是形式主义。
 
 新增一个站点的最短路径：
@@ -263,14 +264,15 @@ CI 会在每次 push / PR 上重跑这四步。**规则表是对外发布的订�
 
 ## 回归测试
 
-本机已可运行 node（v24+）。两个测试都是**把 `eagle-fullsize.user.js` 本体加载进 `vm` 沙箱**执行，
+本机需要 node（v20+）。测试都是**把 `eagle-fullsize.user.js` 本体加载进 `vm` 沙箱**执行，
 而不是拷贝一份逻辑出来测；只替换两处 I/O（UI 日志、网络），且每处替换都带断言 —— 源码结构一变就报错，
 不会静默变成假绿。
 
 ```bash
-node eagle-batch-collector/tests/resolve-harness.mjs   # 解析器回归：假 DOM，30 项断言
-node eagle-batch-collector/tests/scroll-harness.mjs    # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
-node eagle-batch-collector/tests/live-eporner.mjs      # 真实站点端到端：需要能访问 eporner
+node tests/validate-rules.mjs    # 规则表结构校验
+node tests/resolve-harness.mjs   # 解析器回归：假 DOM，40 项断言
+node tests/scroll-harness.mjs    # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
+node tests/live-eporner.mjs      # 真实站点端到端：需要能访问 eporner
 ```
 
 覆盖的事故与守卫：
@@ -355,3 +357,5 @@ Eagle 的图重推一遍**，在素材库里堆出重复。现在重扫时命中
 | 「替换页面图片」只换掉了首屏那十几张 | 同上的虚拟化原因：那一刻 DOM 里**只有**那十几张。旧实现还额外用了 `thumb` 对齐，而重挂载后同一个 pin 的 `thumb` 常常换成另一个尺寸的候选地址，于是连那十几张都可能对不上。现在改为按**稳定 key**（详情页链接去掉 query/hash）对齐，并且「跟随滚动」模式下**边滚边换**。见 `tests/scroll-harness.mjs` 断言 7、8。 |
 | 日志说「N 个 tile 指向同一张原图」 | 不是 bug。Pinterest 的推荐流会把同一个 pin 推好几次，页面上就有几个 tile 指向同一张原图。脚本按 URL 去重后再推送，重复项会被标成「重复，已跳过」；本地替换为了保持所见即所得仍然照换，挑图时留意即可。 |
 | 页面上明明有几百条，推送却只发了一部分 | 看推送日志里的 `（已按 URL 去重）`：条目数常多于实际照片数（实测 eporner 106 条 → 85 张）。 |
+| 升级了脚本，却一直收不到规则更新 | 老版本的 GM 存储里存着一份 `subscriptionUrl: ''`，而 `Object.assign({}, DEFAULT_SETTINGS, stored)` 会让存下来的旧值**盖掉新默认值** —— 而且这个失败是完全静默的（日志只会说「未配置订阅地址，使用内置规则」）。现在 `subscriptionUrlOf()` 把空字符串归一化成官方订阅表，设置页里显示的就是**实际生效**的地址；想彻底只用内置规则（离线 / 内网），把那一栏明确填成 `none`。`tests/resolve-harness.mjs` 有 10 条断言盯着这个行为。 |
+| Tampermonkey 里出现了两份同名脚本 | 脚本身份是 `@name` + `@namespace` 的组合。本仓库沿用了最初的 `namespace: eagle-batch-collector`，所以从旧版升级是**原地更新、设置不丢**；如果你手动改过 `@namespace`，Tampermonkey 会当成另一个脚本装第二份，删掉多余的那份即可。 |

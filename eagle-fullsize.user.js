@@ -204,6 +204,24 @@
   };
 
   const settings = Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}));
+
+  // ★ 这里的空字符串不等于「我不要订阅」。
+  //
+  // 老版本在这套存储里留下过一份 `subscriptionUrl: ''`（那时默认值就是空），
+  // 而 Object.assign 会让存下来的旧值盖掉新默认值 —— 结果是「脚本升级了，
+  // 却永远收不到规则更新」，而且这个失败**完全静默**：日志只会说
+  // 「未配置订阅地址，使用内置规则」，用户不会觉得哪里不对。
+  //
+  // 所以规则是：空 = 跟随 DEFAULT_SETTINGS 里的官方订阅表（升级即生效）；
+  // 想彻底只用内置规则（离线 / 内网 / 不想联网），把它明确填成 `none`。
+  const SUBSCRIPTION_OFF = new Set(['none', 'off', '-', '0', 'false', 'no']);
+  function subscriptionUrlOf() {
+    const raw = String(settings.subscriptionUrl == null ? '' : settings.subscriptionUrl).trim();
+    if (!raw) return DEFAULT_SETTINGS.subscriptionUrl;
+    if (SUBSCRIPTION_OFF.has(raw.toLowerCase())) return '';
+    return raw;
+  }
+
   function saveSettings(patch) {
     Object.assign(settings, patch);
     store.set('settings', settings);
@@ -283,9 +301,9 @@
   }
 
   async function loadSubscription(silent) {
-    const url = settings.subscriptionUrl;
+    const url = subscriptionUrlOf();
     if (!url) {
-      if (!silent) log('未配置订阅地址，使用内置规则。', 'warn');
+      if (!silent) log('订阅已关闭（订阅地址填的是 none），只用内置规则。', 'warn');
       return false;
     }
     try {
@@ -1999,7 +2017,9 @@
 
   function fillSettings() {
     const sh = ui.sh;
-    sh.getElementById('s-sub').value = settings.subscriptionUrl || '';
+    // 显示**实际生效**的地址：老版本存下的空值会被 subscriptionUrlOf() 补成官方默认，
+    // 这里如实反映出来，用户才不会以为「我明明是空的，凭什么在联网」。
+    sh.getElementById('s-sub').value = subscriptionUrlOf();
     sh.getElementById('s-org').value = settings.eagleOrigin || '';
     sh.getElementById('s-tags').value = settings.tags || '';
     sh.getElementById('s-batch').value = settings.batchSize;

@@ -237,5 +237,42 @@ console.log('\n== 9. 按 URL 去重（106 个条目 → 85 张照片 的那个�
   ok('全部同址时只剩 1 条待发', allSame.unique.length === 1, String(allSame.unique.length));
 }
 
+// ============================================================
+// 【订阅地址归一化】空字符串必须等于「跟随官方订阅表」
+// ============================================================
+// 这不是洁癖。老版本在这套 GM 存储里留下过一份 `subscriptionUrl: ''`，
+// 而 `Object.assign({}, DEFAULT_SETTINGS, stored)` 会让存下来的旧值盖掉新默认值 ——
+// 结果是「脚本升级了，却永远收不到规则更新」，而且这个失败**完全静默**。
+// 而「改规则不用重装脚本」正是这个项目对外的核心承诺，所以它必须有断言看着。
+{
+  const OFFICIAL = EBC.DEFAULT_SETTINGS.subscriptionUrl;
+  if (!OFFICIAL) throw new Error('DEFAULT_SETTINGS.subscriptionUrl 是空的 —— 归一化就没有意义了');
+
+  const saved = EBC.settings.subscriptionUrl;
+  const t = (label, input, expect) => {
+    EBC.settings.subscriptionUrl = input;
+    let got;
+    try {
+      got = EBC.subscriptionUrlOf();
+    } catch (e) {
+      got = 'throw: ' + e.message;
+    }
+    ok(label, got === expect, `期望 ${JSON.stringify(expect)}，实得 ${JSON.stringify(got)}`);
+  };
+
+  t('空字符串 → 回落到官方订阅表（老存储的关键修复）', '', OFFICIAL);
+  t('null 同样回落', null, OFFICIAL);
+  t('undefined 同样回落', undefined, OFFICIAL);
+  t('纯空白也回落', '   ', OFFICIAL);
+  t('自定义地址原样生效', 'https://example.com/my.json', 'https://example.com/my.json');
+  t('两侧空白被裁掉', '  https://example.com/a.json  ', 'https://example.com/a.json');
+  t('none → 明确关闭（返回空串，不再联网）', 'none', '');
+  t('off → 明确关闭', 'off', '');
+  t('NONE 大小写不敏感', 'NONE', '');
+  t('地址里含 none 字样不会被误判成关闭', 'https://example.com/none.json', 'https://example.com/none.json');
+
+  EBC.settings.subscriptionUrl = saved;
+}
+
 console.log(`\n${failed ? '❌' : '✅'} ${failed ? failed + ' 项失败' : '全部通过'}\n`);
 process.exit(failed ? 1 : 0);

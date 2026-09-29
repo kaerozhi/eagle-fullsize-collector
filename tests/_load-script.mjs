@@ -170,7 +170,7 @@ export function loadEbc({ gmGet, document: doc, location: loc } = {}) {
   if (ci < 0) throw new Error('找不到 IIFE 结尾');
   src =
     src.slice(0, ci) +
-    '\n  globalThis.__EBC__ = { resolveItem, readSelectorAttr, buildEndpointIndex, collectItems, pathDir, dedupeByUrl, BUILTIN_RULES, collectAll, mergeItems, itemKey, usableUrl, SCROLL, findRuleFor, applyReplacements, followPass, settings,' +
+    '\n  globalThis.__EBC__ = { resolveItem, readSelectorAttr, buildEndpointIndex, collectItems, pathDir, dedupeByUrl, BUILTIN_RULES, collectAll, mergeItems, itemKey, usableUrl, SCROLL, findRuleFor, applyReplacements, followPass, settings, subscriptionUrlOf, DEFAULT_SETTINGS,' +
     '\n    __set: (o) => { if ("resolvedCache" in o) resolvedCache = o.resolvedCache; if ("currentRule" in o) currentRule = o.currentRule; if ("accum" in o) accum = o.accum; if ("scanAbort" in o) scanAbort = o.scanAbort; },' +
     '\n    __get: () => ({ resolvedCache, accum, resolvedByKey, sentUrls, followFilled }) };\n' +
     src.slice(ci);
