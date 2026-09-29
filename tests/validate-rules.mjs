@@ -177,6 +177,67 @@ for (const [i, r] of (Array.isArray(data.rules) ? data.rules : []).entries()) {
   }
 }
 
+// ---- 版本漂移守门人 ----
+// 为什么要有这一段：Tampermonkey **只看 `@version`** 决定要不要给用户推送更新。
+// 改完代码忘了动 `@version`，用户就永远收不到这个版本 —— 而且没有任何报错，
+// 表现得就像「推送了但没人更新」。发布 v0.2.0 时就真踩了一次（代码写了 0.2.0、
+// 头部还是 0.1.0）。只读头几行文本，不做 VM 加载，所以不影响这个脚本「毫秒级」的定位。
+try {
+  const src = readFileSync(resolve(here, '..', 'eagle-fullsize.user.js'), 'utf8');
+  const header = /^\/\/\s*@version\s+(\S+)\s*$/m.exec(src);
+  // 注意 `^\s*`：这行是**缩进过的**（`  const VERSION = '0.2.0';`，在 try 块里）。
+  // 第一版写成 `^const VERSION` 恒不匹配，于是守门人永远报「找不到 const VERSION」——
+  // 看起来像拦下了问题，其实是在喊狼来了。负例测试必须验证「因为漂移而失败」，
+  // 而不是「因为正则写错而失败」。
+  const konst = /^\s*const VERSION\s*=\s*'([^']+)';/m.exec(src);
+  if (!header) problems.push('userscript 头部找不到 @version');
+  else if (!konst) problems.push('userscript 里找不到 const VERSION = \'...\'');
+  else if (header[1] !== konst[1]) {
+    problems.push(
+      `版本号漂移：@version 是 ${header[1]}，而 const VERSION 是 ${konst[1]}。` +
+        'Tampermonkey 只认 @version，不同步的话用户收不到这次更新。'
+    );
+  } else {
+    warn.push(`版本号一致：${header[1]}`);
+  }
+} catch (e) {
+  problems.push(`读不到 eagle-fullsize.user.js：${e.message}`);
+}
+
+// ---- 编码污染守门人 ----
+// 为什么要有这一段：`node --check` 只能抓「乱码破坏了语法」的那种。
+// 现实里更阴的是**引号完好、只有正文变成乱码** —— 语法照样通过，CI 全绿，
+// 但用户界面上的中文全成了「两个字节拼一个生僻字」的样子。
+// 肇事者是 PowerShell 的 `Get-Content -Raw` / `Set-Content`：它们按**系统 ANSI
+// 代码页**（简中机器上是 GBK）读写，于是 UTF-8 的中文被逐字节重解释后再存回去。
+// 发布 v0.2.0 时把我自己坑了一次：用它做「负例测试」的临时改写，600 处中文被毁，
+// 而且写回时还吃掉了收尾的引号。**改这个仓库的任何文件，一律用 UTF-8 工具，
+// 不要用 PowerShell 的字符串管道。**
+//
+// 用 \u 转义写这组字符，是为了让本文件自己不含乱码字符 —— 这样它也能进扫描名单。
+// 只挑几乎不可能合法出现的那几个生僻字（见下面的 \u 转义表）。
+const MOJIBAKE_RE = /[\u940E\u9225\u950B\u93C2\u938C\u9420\u9411\u947B]/;
+for (const rel of ['eagle-fullsize.user.js', 'README.md', 'rules/default.json', 'tests/validate-rules.mjs']) {
+  let text;
+  try {
+    text = readFileSync(resolve(here, '..', rel), 'utf8');
+  } catch (e) {
+    problems.push(`读不到 ${rel}：${e.message}`);
+    continue;
+  }
+  if (text.includes('\uFFFD')) {
+    problems.push(`${rel}: 含替换字符 U+FFFD —— 文件已经不是合法 UTF-8，编码被写坏了`);
+  }
+  const hit = MOJIBAKE_RE.exec(text);
+  if (hit) {
+    problems.push(
+      `${rel}: 出现乱码字符「${hit[0]}」（U+${hit[0].codePointAt(0).toString(16).toUpperCase()}）—— ` +
+        '这个文件八成被 PowerShell 的 Get-Content/Set-Content 处理过（它按系统 ANSI 代码页读写）。' +
+        '请从 git 里 checkout 回来，然后用 UTF-8 工具重做改动。'
+    );
+  }
+}
+
 for (const w of warn) console.log(`  ⚠️  ${w}`);
 if (problems.length) {
   console.error(`\n❌ rules/default.json 有 ${problems.length} 个问题：`);
