@@ -318,7 +318,7 @@ CI（`.github/workflows/ci.yml`）会在每次 push / PR 上重跑这四步。**
 
 ```bash
 node tests/validate-rules.mjs    # 规则表结构校验
-node tests/resolve-harness.mjs   # 解析器回归：假 DOM，105 项断言
+node tests/resolve-harness.mjs   # 解析器回归：假 DOM，118 项断言
 node tests/scroll-harness.mjs    # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
 node tests/live-eporner.mjs      # 真实站点端到端：需要能访问 eporner
 node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
@@ -354,6 +354,26 @@ node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑�
 | 17 | **kitty-kats**：`a[href*='pixhost'], img.bbImage` 只收帖子图、排除头像；`thumb` 是 `t2` 的 thumbs 图；`link` 是 pixhost 的 show 页（去重靠它）；3 条 `itemKey` 互不相同 |
 | 18 | **kitty-kats**：`rewrite` 逐条得到 show 页里的 `img2` 地址、不再带 `/thumbs/`、3 条互不相同；且 **`t9 → img9`、`t3.pixhost.to → img3.pixhost.to`**（证明主机号与 tld 都是捕获组，不是写死的 `img2`）；非 pixhost 的缩略图不会被误改 |
 | 19 | **kitty-kats 结构性负例**：规则里**只有 `rewrite`**，没有 `probe`、没有 `attr` —— 因为 pixhost 主机号写错时返回的是**能正常 onload 的占位图**，`probe` 在此站必然误判成功 |
+| 20 | **全规则裸域回归**：对 4 条规则逐条钉死「裸域 / `www` / 子域」三种写法都必须命中，外加 3 条反向负例（`example.com/kitty-kats.net/`、`notpornpics.com`、`pinterest.com.evil.test`）不许误伤 —— 守住 `patternToRe` 那个静默 bug（见下） |
+
+### patternToRe 的裸域静默 bug（v0.4.1 修复）
+
+`patternToRe()` 把规则里的通配写法编译成正则，原文是：
+
+```js
+s = s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');  // 先把 . 转义成 \.
+s = s.replace(/\*\./g, '(?:[^/]+\\.)?');      // 再找 *. —— 已经不存在了
+```
+
+第二行是**死代码**：第一行已经把 `.` 转义成 `\.`，字符串里是 `*\.`，而这里找的是 `*.`，永远匹配不上。
+于是 `*://*.kitty-kats.net/*` 编译成 `^(?:https?|file)://.*\.kitty-kats\.net/.*$` —— **必须带子域**才命中。
+
+而人访问时敲的几乎都是裸域（`https://kitty-kats.net/threads/...`，不是 `www.` 开头），
+症状就是**脚本装好了、版本也对，但打开页面什么都不发生**。四条规则全部中招，且完全不像正则问题。
+
+修法：把模式改成 `/\*\\\./g`（匹配 `*` + `\` + `.`），让那行注释「`*.example.com` 也匹配裸域」
+第一次变成真的。第 20 节断言即为它而设。这个 bug 是由用户实机反馈（"kitty-kat 好像不成功"）暴露的 ——
+纯靠 CI 不可能发现，因为原来的测试全都用 `www.` 开头的 URL 去命中规则。
 
 `live-eporner.mjs` 用**脚本自己的 `buildEndpointIndex`** 处理真实响应，2026-09-29 实测：
 

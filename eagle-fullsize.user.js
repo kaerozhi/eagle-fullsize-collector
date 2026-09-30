@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.4.0
+// @version      0.4.1
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.4.0';
+  const VERSION = '0.4.1';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -339,7 +339,12 @@
     // 先转义正则元字符，但保留 * 与 /
     let s = String(pat).replace(/[.+?^${}()|[\]\\]/g, '\\$&');
     s = s.replace(/\*:\/\//g, '(?:https?|file)://');   // 协议部分
-    s = s.replace(/\*\./g, '(?:[^/]+\\.)?');           // *.example.com 也匹配裸域
+    // ★ 这里匹配的是 *\.（星号 + 反斜杠 + 点），不是 *.
+    // 上一行已经把 . 转义成 \. 了，写成 /\*\./ 永远匹配不上 —— 那是个静默 bug：
+    // 所有 "*://*.example.com/*" 形式的规则只认子域、不认裸域，
+    // 而大家访问时几乎都敲裸域（https://eporner.com/... 而不是 www.eporner.com/...）。
+    // v0.4.1 修的就是这个。
+    s = s.replace(/\*\\\./g, '(?:[^/]+\\.)?');         // *.example.com 也匹配裸域
     s = s.replace(/\*/g, '.*');                        // 其余 * 任意字符（含 /）
     const re = new RegExp('^' + s + '$', 'i');
     reCache.set(pat, re);

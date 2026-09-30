@@ -612,5 +612,54 @@ console.log('\n== 9. 按 URL 去重（106 个条目 → 85 张照片 的那个�
   }
 }
 
+console.log('\n== 20. 回归：每条规则的裸域都必须命中（v0.4.1 修的就是这个）==');
+{
+  // patternToRe 里 "*.example.com 也匹配裸域" 的那次 replace 曾经是死代码：
+  // 上一行已经把 . 转义成 \.，所以 /\*\./ 永远匹配不上，编译出来是
+  //   ^(?:https?|file)://.*\.example\.com/.*$
+  // —— 只认子域，不认裸域。而人访问时敲的几乎都是裸域
+  //（https://eporner.com/... 而不是 https://www.eporner.com/...），
+  // 症状是「脚本装好了但什么都不发生」，极难往正则上想。
+  //
+  // 这一节对每条规则把「裸域 / www / 子域」三种写法都钉死，
+  // 以后谁再动 patternToRe 都会立刻红。
+  const CASES = [
+    [
+      'pinterest',
+      [
+        'https://pinterest.com/pin/1/',
+        'https://www.pinterest.com/pin/1/',
+        'https://ru.pinterest.com/pin/1/',
+      ],
+    ],
+    ['eporner', ['https://eporner.com/gallery/x/', 'https://www.eporner.com/gallery/x/']],
+    ['pornpics', ['https://pornpics.com/galleries/x/', 'https://www.pornpics.com/galleries/x/']],
+    [
+      'kitty-kats',
+      [
+        'https://kitty-kats.net/threads/x.1/',
+        'https://www.kitty-kats.net/threads/x.1/',
+        'https://kitty-kats.net/threads/x.1/page-2',
+      ],
+    ],
+  ];
+  for (const [want, urls] of CASES) {
+    for (const u of urls) {
+      const r = EBC.findRuleFor(u);
+      ok(`${want}：命中 ${u}`, !!r && r.id === want, r ? r.id : '(无规则)');
+    }
+  }
+
+  // 放宽子域之后不能反向误伤：域名里出现目标串、但位置不对的，一律不许命中。
+  for (const u of [
+    'https://example.com/kitty-kats.net/',
+    'https://notpornpics.com/galleries/x/',
+    'https://pinterest.com.evil.test/pin/1/',
+  ]) {
+    const r = EBC.findRuleFor(u);
+    ok(`不该被误伤：${u}`, !r, r ? r.id : '');
+  }
+}
+
 console.log(`\n${failed ? '❌' : '✅'} ${failed ? failed + ' 项失败' : '全部通过'}\n`);
 process.exit(failed ? 1 : 0);
