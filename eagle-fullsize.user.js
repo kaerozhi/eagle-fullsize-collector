@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.2.0
+// @version      0.3.0
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.2.0';
+  const VERSION = '0.3.0';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -178,6 +178,51 @@
         },
         { type: 'pagedata', idFrom: '([0-9]{6,})' },
         { type: 'probe', candidates: [{ re: '_\\d+x\\d+\\.jpg$', to: '.jpg' }] },
+      ],
+    },
+    {
+      id: 'pornpics',
+      name: 'PornPics 画廊',
+      enabled: true,
+      match: ['*://*.pornpics.com/*'],
+      referer: 'https://www.pornpics.com/',
+      collect: {
+        // 实测：图块是 <a class='rel-link' … data-tid="002">，原图就挂在它自己的 href 上。
+        // 两个选择器选的是同一批元素，写成组是为了多一层保险（列表页的画廊链接是
+        // JS 渲染的，无法离线核实其标记）。
+        item: 'a.rel-link, a[data-tid]',
+        img: 'img',
+        link: 'self',
+        // 实测：src 是 1x1 透明占位图（static.pornpics.com/style/img/1px.png），
+        // 真图在 data-src（460 预览图），所以是懒加载页
+        scrollToLoad: true,
+      },
+      // 实测结论（2026-09-29，真实画廊页 + node 自校验）：
+      //   条目长这样：
+      //     <a class='rel-link' href='https://cdni.pornpics.com/1280/…_002_f6a3.jpg' data-tid="002">
+      //       <img src='https://static.pornpics.com/style/img/1px.png'
+      //            data-src='https://cdni.pornpics.com/460/…_002_f6a3.jpg'>
+      //     </a>
+      //   尺寸段是 URL 路径的第一段，其余部分逐字节相同。HEAD 实测：
+      //     /460/  → 920x614
+      //     /1280/ → 1920x1281，与页面 data-pswp-width/height 声明完全吻合
+      //     而 /640/ /800/ /1600/ /1920/ /2560/ /orig/ /full/ 全部 404
+      //   → /1280/ 就是原图。
+      //   把每条 data-src 的 460 按下面这条规则改写成 1280，再与同一锚点**自身的
+      //   href** 比对：线上 20/20 完全一致。
+      //   也就是说这不是「猜原图地址」，而是重建页面已经发布出去的地址。
+      resolve: [
+        {
+          type: 'rewrite',
+          rules: [{ re: '//cdni\\.pornpics\\.com/\\d+/', to: '//cdni.pornpics.com/1280/' }],
+        },
+        // ★ 故意不写 attr 步骤：本站条目 img 的 src 是 1x1 占位图，它与缩略图(460)
+        //   不同且是 https，能通过 resolveItem 的 got !== thumb 守卫，于是占位图会被
+        //   当成原图推给每一条 —— 正是 eporner 那次 catimg/3_small.jpg 事故
+        //   （106 条全变成同一张 102x75）的同型故障。
+        // ★ 也故意不写 idAttr：data-tid 是 002/005 这种，只在单个画廊内唯一，而
+        //   itemKey 让 externalId 优先 —— 一旦页面含多个画廊就会互相塌缩成一条。
+        //   去掉 idAttr 后，去重落到 link:（＝锚点 href 的 /1280/ 地址），全局唯一。
       ],
     },
   ];

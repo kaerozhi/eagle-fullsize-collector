@@ -11,7 +11,7 @@
  * 用法：node eagle-batch-collector/tests/resolve-harness.mjs
  * 沙箱与假 DOM 来自 ./_load-script.mjs
  */
-import { El, fakeDocument, loadEbc, epornerRule } from './_load-script.mjs';
+import { El, fakeDocument, loadEbc, epornerRule, pornpicsRule } from './_load-script.mjs';
 
 const GALLERY_DIR = 'https://static-ca-cdn.eporner.com/gallery/Ol/oQ/5IUmqWloQOl/';
 const CATIMG = 'https://static-ca-cdn.eporner.com/catimg/3_small.jpg';
@@ -362,6 +362,122 @@ console.log('\n== 9. 按 URL 去重（106 个条目 → 85 张照片 的那个�
 
   EBC.settings.nameTemplate = savedTpl;
   sandbox.document.title = savedTitle;
+}
+
+// ============================================================
+// 【pornpics】rewrite 必须重建出页面自己写着的 href
+// ============================================================
+// 真实画廊页的每一条：
+//   <a class='rel-link' href='…/1280/…_002_f6a3.jpg' data-tid="002">
+//     <img src='…/static.pornpics.com/style/img/1px.png'
+//          data-src='…/460/…_002_f6a3.jpg'>
+//   </a>
+// 线上把每条 data-src 的 460 改写成 1280 后，与**同一锚点自身的 href** 比对是 20/20。
+// 所以规则不是在猜原图地址，而是在重建页面已经写着的地址。
+{
+  const PP = pornpicsRule(EBC);
+  const GAL = '7/658/25875390';
+  const NUMS = ['002', '005', '011'];
+  const PX = 'https://static.pornpics.com/style/img/1px.png';
+  const ppThumb = (n) => `https://cdni.pornpics.com/460/${GAL}/25875390_${n}_f6a3.jpg`;
+  const ppOrig = (n) => `https://cdni.pornpics.com/1280/${GAL}/25875390_${n}_f6a3.jpg`;
+
+  const makePp = ({ withDataSrc = true } = {}) => {
+    const body = new El('body');
+    const anchors = [];
+    for (const n of NUMS) {
+      const a = new El('a', { class: 'rel-link', href: ppOrig(n), 'data-tid': n });
+      const imgAttrs = { src: PX, alt: 'Emma White' };
+      if (withDataSrc) imgAttrs['data-src'] = ppThumb(n);
+      const img = new El('img', imgAttrs);
+      a.appendChild(img);
+      body.appendChild(a);
+      anchors.push(a);
+    }
+    return { body, anchors };
+  };
+
+  const ppItem = (page, i) => ({
+    el: page.anchors[i],
+    img: page.anchors[i].children[0],
+    thumb: page.anchors[i].children[0].getAttribute('data-src') || '',
+    link: page.anchors[i].href,
+    externalId: '',
+  });
+
+  console.log('\n== 13. pornpics：选择器与缩略图来源 ==');
+  {
+    const page = makePp();
+    usePage(page);
+    const items = EBC.collectItems(PP);
+    ok('a.rel-link, a[data-tid] 这个选择器组能选中 3 条', items.length === 3, String(items.length));
+    ok(
+      'thumb 取的是 data-src 的 460 图，不是 1px 占位图',
+      items.length === 3 && items.every((it, i) => it.thumb === ppThumb(NUMS[i])),
+      JSON.stringify(items.map((it) => it.thumb))
+    );
+    ok(
+      '没有采集 externalId（规则里故意不写 idAttr）',
+      items.every((it) => !it.externalId),
+      JSON.stringify(items.map((it) => it.externalId))
+    );
+  }
+
+  console.log('\n== 14. pornpics：rewrite 重建出页面自己的 href ==');
+  {
+    const page = makePp();
+    usePage(page);
+    const all = [];
+    for (let i = 0; i < NUMS.length; i++) {
+      const r = await EBC.resolveItem(ppItem(page, i), PP, freshState());
+      ok(`第 ${i + 1} 条解析来源是 rewrite`, r && r.via === 'rewrite', JSON.stringify(r && r.via));
+      ok(`第 ${i + 1} 条结果 === 锚点自己的 href`, r && r.url === page.anchors[i].href, r && r.url);
+      ok(`第 ${i + 1} 条不再带 460 段`, r && !/\/460\//.test(r.url), r && r.url);
+      if (r) all.push(r.url);
+    }
+    ok('3 条互不相同（不会塌缩成同一张）', new Set(all).size === 3, JSON.stringify(all));
+  }
+
+  console.log('\n== 15. pornpics：负例 —— 为什么规则里绝对不能有 attr 步骤 ==');
+  {
+    const page = makePp();
+    usePage(page);
+    const TRAP = { ...PP, resolve: [{ type: 'attr', selectors: ['img@src'] }] };
+    const r = await EBC.resolveItem(ppItem(page, 0), TRAP, freshState());
+    ok('attr:img@src 确实会把 1x1 占位图当成原图返回', r && r.url === PX, r && r.url);
+    ok(
+      '而且它和缩略图不同，能通过 got !== thumb 守卫 —— 这就是事故成因',
+      r && r.url !== page.anchors[0].children[0].getAttribute('data-src')
+    );
+    const good = await EBC.resolveItem(ppItem(page, 0), PP, freshState());
+    ok('真实规则在同一条目上给出 /1280/', good && good.url === ppOrig(NUMS[0]), good && good.url);
+  }
+
+  console.log('\n== 16. pornpics：多画廊页面不能塌缩（idAttr 陷阱的反证） ==');
+  {
+    // 两个画廊各自都有 002。规则若写了 idAttr: self@data-tid，itemKey 会让
+    // externalId 优先，两条 002 就会被当成同一条。
+    const body = new El('body');
+    const mk = (gal, n) => {
+      const a = new El('a', {
+        class: 'rel-link',
+        href: `https://cdni.pornpics.com/1280/${gal}/x_${n}_aa.jpg`,
+        'data-tid': n,
+      });
+      a.appendChild(
+        new El('img', { src: PX, 'data-src': `https://cdni.pornpics.com/460/${gal}/x_${n}_aa.jpg` })
+      );
+      body.appendChild(a);
+    };
+    mk('7/658/25875390', '002');
+    mk('7/658/99999999', '002');
+    usePage({ body });
+    const items = EBC.collectItems(PP);
+    const keys = items.map((it) => EBC.itemKey(it));
+    ok('两个画登记 2 条', items.length === 2, String(items.length));
+    ok('两条的 itemKey 不相同（去重落在锚点 href 上）', new Set(keys).size === 2, JSON.stringify(keys));
+    ok('itemKey 用的是 link: 前缀而不是 id:', keys.every((k) => k.startsWith('link:')), JSON.stringify(keys));
+  }
 }
 
 console.log(`\n${failed ? '❌' : '✅'} ${failed ? failed + ' 项失败' : '全部通过'}\n`);

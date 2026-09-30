@@ -102,6 +102,31 @@
         { "type": "pagedata", "idFrom": "([0-9]{6,})" },
         { "type": "probe", "candidates": [{ "re": "_\\d+x\\d+\\.jpg$", "to": ".jpg" }] }
       ]
+    },
+    {
+      "id": "pornpics",
+      "name": "PornPics 画廊",
+      "enabled": true,
+      "match": ["*://*.pornpics.com/*"],
+      "referer": "https://www.pornpics.com/",
+      "collect": {
+        "item": "a.rel-link, a[data-tid]",
+        "img": "img",
+        "link": "self",
+        "scrollToLoad": true
+      },
+      "_实测结论": "2026-09-29 用真实画廊页 + node 自校验定型。①每条长这样：<a class='rel-link' href='…/1280/…'><img src='…/static.pornpics.com/style/img/1px.png' data-src='…/460/…'></a> —— src 是 1×1 透明占位图，data-src 是 460 预览图，而锚点 href 自己就指着 1280。②尺寸段是 URL 路径第一段，其余部分逐字节相同；HEAD 实测 /460/ → 920×614、/1280/ → 1920×1281（与页面 data-pswp-width/height 声明完全吻合），而 /640/ /800/ /1600/ /1920/ /2560/ /orig/ /full/ 全部 404 → /1280/ 就是原图。③把每条 data-src 的 460 按本规则改写成 1280，与同一锚点自身的 href 比对：20/20 完全一致 → 不是猜地址，而是重建页面自己已经写着的地址。④【不要写 attr 步骤】img 的 src 是 1px 占位图，它与 thumb(460) 不同且是 https，会通过 resolveItem 的 got !== thumb 守卫，导致 20 条全部被推成同一张 1×1 占位图 —— 即 eporner 那次 catimg/3_small.jpg 事故的同型故障。⑤【不要写 idAttr】data-tid 是 002/005 这种，只在单个画廊内唯一，而 itemKey 让 externalId 优先 → 一旦页面含多个画廊就会互相塌缩成一条；改用锚点 href 去重（全局唯一）。⑥meta 写明 20 pics、页面无分页，20 条即全部；页面上另一处「54 pics」是赞助外链文案，与画廊无关。⑦collect.item 写成选择器组 a.rel-link, a[data-tid]：rel-link 是站点给这些图块的类（实测 20/20 命中），data-tid 是同一批图块上的照片序号属性。两个都写是因为列表页的画廊链接是 JS 渲染的、无法离线核实其标记，多一个属性选择器多一层保险；两者选中的是同一批元素，不会重复收集。",
+      "resolve": [
+        {
+          "type": "rewrite",
+          "rules": [
+            {
+              "re": "//cdni\\.pornpics\\.com/\\d+/",
+              "to": "//cdni.pornpics.com/1280/"
+            }
+          ]
+        }
+      ]
     }
   ]
 }

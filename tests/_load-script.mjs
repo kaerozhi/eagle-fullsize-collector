@@ -27,11 +27,19 @@ export function matchesSel(el, sel) {
 }
 
 function matchesOne(el, sel) {
-  const m = /^([a-zA-Z]*)((?:\[[^\]]+\])*)$/.exec(sel);
+  // 支持 .class —— pornpics 的真实规则用的是 "a.rel-link"。
+  // 类名段只允许出现在标签之后、属性之前，所以不会误伤属性值里的点：
+  // 像 [href*='.com'] 那种仍整体落进属性分支，不会被当成类名。
+  const m = /^([a-zA-Z]*)((?:\.[A-Za-z0-9_-]+)*)((?:\[[^\]]+\])*)$/.exec(sel);
   if (!m) return false;
   const tag = m[1];
   if (tag && el.tagName !== tag.toUpperCase()) return false;
-  const attrs = m[2] ? m[2].match(/\[[^\]]+\]/g) || [] : [];
+  const classes = (m[2].match(/\.[A-Za-z0-9_-]+/g) || []).map((c) => c.slice(1));
+  if (classes.length) {
+    const have = String(el.getAttribute('class') || el.className || '').split(/\s+/);
+    if (!classes.every((c) => have.includes(c))) return false;
+  }
+  const attrs = m[3] ? m[3].match(/\[[^\]]+\]/g) || [] : [];
   for (const a of attrs) {
     const am = /^([^\]=*^$~|]+)\s*(\*=|\^=|\$=|=)?\s*(.*)$/.exec(a.slice(1, -1));
     if (!am) return false;
@@ -249,5 +257,12 @@ export function loadEbc({ gmGet, document: doc, location: loc } = {}) {
 export function epornerRule(EBC) {
   const r = EBC.BUILTIN_RULES.find((x) => /eporner/i.test(JSON.stringify(x)));
   if (!r) throw new Error('内置规则里找不到 eporner');
+  return r;
+}
+
+/** 找到内置的 pornpics 规则 */
+export function pornpicsRule(EBC) {
+  const r = EBC.BUILTIN_RULES.find((x) => x.id === 'pornpics');
+  if (!r) throw new Error('内置规则里找不到 pornpics');
   return r;
 }

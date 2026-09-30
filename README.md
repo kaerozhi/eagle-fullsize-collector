@@ -130,9 +130,11 @@ Eagle 的 Chrome 扩展「批量收藏」读的是页面上 `<img>` 当前的 `s
 | 站点 | 原图 URL 尾段 | 送进 Eagle 的名字 |
 |---|---|---|
 | eporner | `10574489-gao-qiaoshou-zi-san-nude.jpg` | `10574489-gao-qiaoshou-zi-san-nude` |
+| pornpics | `25875390_002_f6a3.jpg` | `25875390_002_f6a3` |
 | Pinterest | `abcdef0123456789.jpg` | `Shoko Takahashi, Yua Mikami - Meganekko … - Eporner-03` |
 
 eporner 那条直接带上了站点的拼音 slug，正是「附带关键信息、方便搜索」想要的。
+pornpics 那条是「画廊号 + 图内序号」，在库里搜 `25875390` 就能把同一个画廊的整套图捞出来，同样有用。
 
 **弱名兜底。** Pinterest 这类 CDN 的尾段是一串哈希，当名字毫无意义。所以脚本会判定「弱名」并改用兜底模板：
 
@@ -315,7 +317,7 @@ CI（`.github/workflows/ci.yml`）会在每次 push / PR 上重跑这四步。**
 
 ```bash
 node tests/validate-rules.mjs    # 规则表结构校验
-node tests/resolve-harness.mjs   # 解析器回归：假 DOM，65 项断言
+node tests/resolve-harness.mjs   # 解析器回归：假 DOM，84 项断言
 node tests/scroll-harness.mjs    # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
 node tests/live-eporner.mjs      # 真实站点端到端：需要能访问 eporner
 node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
@@ -344,6 +346,10 @@ node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑�
 | 10 | **素材名**：`baseNameOfUrl` 从 URL 尾段取名字，弱名判定真值表（纯哈希 / 纯数字 / 保留字）逐条过 |
 | 11 | **素材名**：Pinterest 那串哈希触发标题兜底；`{n}` 补两位；**任何情况下 `buildItemName` 都不返回空串** |
 | 12 | **素材名**：`collectItems` 真的把 `alt` 采集进来了（兜底的原料） |
+| 13 | **pornpics**：`a.rel-link, a[data-tid]` 选择器组能选中条目；`thumb` 取的是 `data-src` 的 460 图而不是 1px 占位图；规则确实不采集 `externalId` |
+| 14 | **pornpics**：`rewrite` 的结果**逐条等于锚点自身的 `href`**（线上 20/20），且结果里不再有 460 段；3 条互不相同 |
+| 15 | **pornpics 负例**：给同一条目加一条 `attr: img@src`，它会返回 1×1 占位图并骗过 `got !== thumb` 守卫 —— 这就是「pornpics 规则里不能写 attr」的实证 |
+| 16 | **pornpics 负例**：两个画廊各自的 `002`，`itemKey` 必须落在 `link:` 上，不能塌缩成 `id:002`（这就是「不能写 idAttr」的实证） |
 
 `live-eporner.mjs` 用**脚本自己的 `buildEndpointIndex`** 处理真实响应，2026-09-29 实测：
 
@@ -360,6 +366,45 @@ XHR /xhr/gallery-slide/5IUmqWloQOl → HTTP 200｜143990 字节｜511 ms
 顺带确认两件事：① 站点图标是**真实存在**的（服务端 HTML 里就有 8 个 `catimg/*_small.jpg`），
 事故前提成立，不是我的误判；② **CDN host 按地区变**（实测为 `static-sg-cdn`，用户环境是 `static-ca-cdn`），
 所以规则**绝不能写死 CDN host** —— 现有规则只匹配页面域名 `*.eporner.com/gallery/*`，是对的。
+
+### pornpics（2026-09-29 取证）
+
+这条规则和 eporner 正好相反 —— eporner 的原图 slug 藏得无处可寻、只能靠 `endpoint`，
+而 pornpics 的**原图地址就明写在页面上**，只是藏在锚点自己的 `href` 里：
+
+```html
+<a class='rel-link' href='https://cdni.pornpics.com/1280/…_002_f6a3.jpg' data-tid="002">
+  <img src='https://static.pornpics.com/style/img/1px.png'
+       data-src='https://cdni.pornpics.com/460/…_002_f6a3.jpg'>
+</a>
+```
+
+`src` 是 1×1 透明占位图，`data-src` 是 460 预览图，而锚点自己的 `href` 指着 1280。
+尺寸段只是 URL 路径的第一段，其余部分逐字节相同：
+
+| 尺寸段 | HEAD 实测 |
+|---|---|
+| `/460/` | 200 · 920×614 |
+| `/1280/` | 200 · **1920×1281**，与页面 `data-pswp-width/height` 的声明完全吻合 |
+| `/640/` `/800/` `/1600/` `/1920/` `/2560/` `/orig/` `/full/` | **全部 404** |
+
+所以 `/1280/` 就是原图。把每条 `data-src` 的 460 按规则改写成 1280，再与**同一锚点自身的
+`href`** 比对：**线上 20/20 完全一致**。也就是说这条规则不是在猜地址，而是在**重建页面
+已经发布出去的地址** —— 这正是它比 `probe` 可靠的地方：不需要为了试地址而多发任何请求。
+
+两个反直觉的地方，都写成了负例测试（#15、#16）：
+
+- **绝对不能写 `attr` 步骤。** 条目 `img` 的 `src` 是 1×1 占位图，它和缩略图（460）不同、
+  而且是 `https`，能通过 `resolveItem` 的 `got !== thumb` 守卫 → 整页 20 条会被全部推成
+  同一张 1×1 占位图。这和 eporner 那次 `catimg/3_small.jpg`（106 条全变成 102×75）是
+  **同型故障**，不是新 bug。
+- **绝对不能写 `idAttr`。** `data-tid` 是 `002`/`005` 这种，只在**单个画廊内**唯一；而
+  `itemKey` 让 `externalId` 优先 → 页面上只要出现第二个画廊，两边的 `002` 就会塌缩成一条。
+  去掉 `idAttr` 后去重落到 `link:`（＝锚点 href 的 `/1280/` 地址），全局唯一。
+
+> 顺带一提：该页 `meta description` 写「Watch **20 pics**」，页面也确实只有 20 个条目、
+> 没有分页。页面上另有一处「54 pics」是**赞助外链**的文案，与画廊无关 —— 别拿页面上的
+> 数字当抓取目标数。
 
 ### `scroll-harness.mjs`：虚拟化列表（Pinterest 那一类）
 
