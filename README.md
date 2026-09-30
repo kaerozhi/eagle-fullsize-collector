@@ -7,6 +7,9 @@
 
 Eagle 的 Chrome 扩展「批量收藏」读的是页面上 `<img>` 当前的 `src` —— 列表页里那就是缩略图。这个工具在它之前插一手：先把缩略图升级成原图地址，再交给 Eagle。
 
+两件独立的事分开维护：**站点规则**说「这一页上哪些 `<img>` 是图」，**图床表**说「这家图床的缩略图怎么换成原图」。
+所以论坛那种「用户可以自由从各种图床贴图」的场景不用逐站适配 —— 加一家图床，所有站点同时受益。见《[图床表](#图床表hosts论坛场景的正解)》。
+
 ---
 
 ## 组成
@@ -14,7 +17,7 @@ Eagle 的 Chrome 扩展「批量收藏」读的是页面上 `<img>` 当前的 `s
 | 文件 | 作用 |
 |---|---|
 | `eagle-fullsize.user.js` | Tampermonkey 油猴脚本（单文件，可直接安装） |
-| `rules/default.json` | **订阅规则表** —— 一个站点一条规则，像 AdBlock 列表一样增删改 |
+| `rules/default.json` | **订阅表** —— 站点规则（`rules`）+ 图床规则（`hosts`），像 AdBlock 列表一样增删改 |
 | `tests/` | 回归测试。把脚本本体加载进 `vm` 沙箱跑，见下面「回归测试」 |
 | `.github/workflows/ci.yml` | 每次 push / PR 自动跑语法检查、规则表校验、两套回归测试 |
 
@@ -100,6 +103,10 @@ Eagle 的 Chrome 扩展「批量收藏」读的是页面上 `<img>` 当前的 `s
 
 面板 →「替换页面图片」。脚本把页面上每个缩略图的 `src` 就地换成原图、并清掉 `srcset`（否则浏览器可能仍按 `srcset` 选小图）。
 之后照常用 Eagle 官方扩展的「批量收藏」，抓到的就是原图。**这条路完全不依赖 Eagle API。**
+
+> 防盗链图床（比如 imagetwist）要额外一步：带本站 Referer 去请求原图会拿到**占位图**，
+> 所以脚本会按图床表的 `referrer` 字段给这些 `img` 设 `referrerPolicy = 'no-referrer'`，
+> 日志里会补一句「其中 N 张来自防盗链图床」。见《图床表》。
 
 配合「**跟随我的滚动**」采集方式（默认，见下）时，替换是**边滚边做**的：你往下滚，脚本静默解析新挂载进来的 tile
 并当场把它们的缩略图换成原图，直到你停。所以「先滚一遍再替换」不是必须的。
@@ -205,6 +212,7 @@ pornpics 那条是「画廊号 + 图内序号」，在库里搜 `25875390` 就�
 | `endpoint` | **最强。** 按规则声明的站点接口发**一次**请求，把响应里所有原图直链挖出来建成 `id → 原图` 索引，每个条目只查表 | 站点有「一次返回整组」的接口（见 eporner：一次请求拿全 85 张） |
 | `attr` | 直接从列表页 DOM 读：`img@data-full`、`img@srcset:last`、`img@src` | 页面本身就藏了原图地址（最常见、最快） |
 | `rewrite` | 对缩略图 URL 做正则改写，**零请求** | 原图地址能从缩略图**推导出来**（如 Pinterest `236x/` → `originals/`） |
+| `host` | 拿缩略图 URL 去顶层 **`hosts`（图床表）**里找匹配的记录，按它的 `thumbRe`/`fullTo` 改写，**零请求** | **论坛场景的正解**：用户可以自由从各种图床贴图，一个站点一条规则从根上不成立 —— 见下文《图床表》 |
 | `pagedata` | 从页面自身数据里按「同目录 + 同 id」找原图：扒页面源码 + 挂钩 XHR/fetch 抓 viewer 响应 + 页面上已显示的大图 | `endpoint` 失效时的兜底 |
 | `probe` | 候选改写逐个用 `Image()` 实测；**只在第一张上定胜负**，之后整页复用胜出的那个 | rewrite 不确定，但可枚举候选 |
 | `detail` | 并发抓每个条目的详情页取 `og:image` | 原图确实只在独立详情页上 |
@@ -225,7 +233,10 @@ pornpics 那条是「画廊号 + 图内序号」，在库里搜 `25875390` 就�
 来源两种写法：`<selector>@<attr>` 从 DOM 读；`url:<正则>` 从当前页 URL 抠。响应里带 `_WxH` 尺寸后缀的地址会被当成缩略图剔掉。
 
 `probe` 的"整页复用"是省流量的关键：不会对 N 张图各试一遍候选。
-`detail` 有两个自动守卫：① 条目链接若与当前页同 URL（仅 `#hash` 不同）直接跳过；② 连续失败 ≥8 次自动停用，避免被限流刷屏。
+`probe` 还带一道**占位图守卫**：候选必须比缩略图更大、且不小于 200px，否则算失败。
+不设这道关，`probe` 在主流图床上就是**必然误判** —— 它们拿不到原图时不返回 404，
+而是回一张能正常解码的占位图（见下文），而 `probe` 只看「加载成功」。
+`detail` 有三个自动守卫：① 条目链接若与当前页同 URL（仅 `#hash` 不同）直接跳过；② 连续失败 ≥8 次自动停用，避免被限流刷屏；③ 可选 `externalOnly: true` —— 只抓**外链**，论坛帖子里头像/引用/楼层链接全是站内链接，一条 `externalOnly` 就把噪音滤干净。
 
 ### 学习模式
 
@@ -233,6 +244,77 @@ pornpics 那条是「画廊号 + 图内序号」，在库里搜 `25875390` 就�
 脚本会比对页面上的**小图**与**大图**，找出两者的差异并泛化成一条 `rewrite` 规则，存进本地规则（覆盖订阅）。
 
 它有一条硬守卫：**只有两个文件名一致（或仅差尺寸后缀）时才敢泛化。** 文件名完全不同的话，改写原理上不可能通用 —— 它会明确告诉你「应该用 detail 策略」，而不是生成一条只对这一张图有效的垃圾正则。
+
+---
+
+## 图床表（`hosts`）：论坛场景的正解
+
+**问题**（用户实测，2026-10-05）：`kitty-kats.net` 这类**用户可以自由发图**的论坛，帖子里的图是用户从各种免费图床贴进来的。
+同一个帖子就可能混用好几家 —— 用户给的那个帖子 117 张全是 ImageTwist，而之前取证过的帖子用的是 pixhost。
+
+所以「为这个论坛写一条站点规则」**从根上就不成立**：改写规律属于**图床**，不属于站点。
+v0.5.0 把这件事抽成顶层 `hosts` 表，与站点规则分开维护：
+
+- **站点规则**只负责「页面上哪些 DOM 节点是帖子图」（`collect`）。
+- **图床表**负责「这个图床的缩略图地址怎么变成原图地址」（`thumbRe` / `fullTo`）。
+
+加一家新图床只往 `hosts` 里加一条，**所有站点规则同时受益**。
+
+### 为什么不能用 `probe` 去「实测哪个能下」
+
+这是这个项目里反复踩到的同一个坑：**这些图床拿不到原图时都不返回 404**，而是返回
+`HTTP 200` + 一张**能正常解码**的 JPEG/PNG 占位图。`probe` 靠 `Image()` 的 `onload`
+判成功，占位图当然能 onload —— 于是整页被推成一堆一模一样的占位图，
+而日志还老老实实地报「N/N 张拿到原图」。
+
+| 图床 | 触发条件 | 拿到的占位图 |
+|---|---|---|
+| pixhost | 主机号写错 | 257×126 / 16138 字节（`image/png`） |
+| imagetwist | 主机号写错 | 177×142 / 8183 字节 |
+| imagetwist | **图片请求带了外来 Referer** | 177×142 / 8346 字节（`image/jpeg`） |
+
+所以图床表里**只用改写**，规律必须是人实测出来的，并写上 `verified` 日期。
+
+### `hosts` 的字段
+
+```jsonc
+{
+  "id": "imagetwist",           // 唯一标识
+  "name": "ImageTwist",         // 面板/日志里显示的名字
+  "match": ["*://*.imagetwist.com/*"],   // 命中该图床**图片 URL** 的 glob（语法同站点规则）
+  "thumbRe": "//((?:img|s)\\d+)\\.imagetwist\\.com/th/",  // 缩略图 URL 的正则
+  "fullTo": "//$1.imagetwist.com/i/",                     // 原图模板，$1 引用上面的捕获组
+  "referrer": "no-referrer",    // 可选：该图床必须**不带 Referer** 才给原图
+  "verified": "2026-10-05"      // 最后一次实机验证的日期。留空 = 没实测过，别信
+}
+```
+
+`referrer` 这一项是**必须的**，漏了会静默出问题：浏览器默认策略会给跨域图片请求带上
+本站 origin 当 Referer，而 imagetwist 看到外来 Referer 就回占位图。脚本在
+「替换页面图片」时会据此把 `img.referrerPolicy` 设成 `no-referrer`。
+（推 Eagle 不受影响 —— Eagle 自己下载时不带 Referer。）
+
+### 通用图床论坛模式（不认站点，只认图床）
+
+命中不了站点规则的页面，脚本会再看一眼：**页面上有没有 ≥3 张来自图床表里已知图床的图**。
+有的话当场合成一条规则接管这一页：
+
+```jsonc
+"collect": { "item": "a[href] > img" },      // 缩略图外面套着图床分享页链接
+"resolve": [
+  { "type": "host" },                         // ① 已知图床：查表，零请求
+  { "type": "detail", "externalOnly": true,   // ② 表里没有的：抓那个分享页取原图直链
+    "selectors": ["meta[property='og:image']@content", "img.pic@src", "img#image@src", "..."] }
+]
+```
+
+② 是万能的：不管哪家图床，它的分享页里一定有原图直链（实测 imagetwist 的分享页就含
+`<img class="pic" src="https://img69.imagetwist.com/i/…">`，pixhost 是 `<img id="image">`），
+而且**两家都不挑 Referer**。代价是每张图多一次请求，所以只在 ① 不认识时才用。
+
+想关掉自动识别：设置里 `autoDetectHosts: false`。
+页面上的图床还没进表、或自动识别没触发时，油猴菜单里有
+**「通用图床论坛模式：在本页强开」**手动开一把（表里有的零请求，没有的走抓分享页）。
 
 ---
 
@@ -244,7 +326,7 @@ pornpics 那条是「画廊号 + 图内序号」，在库里搜 `25875390` 就�
 # 1. 改 rules/default.json —— 加一条站点规则，或修一条老规则
 # 2. 本地自检（四条命令，都是毫秒级）
 node --check eagle-fullsize.user.js   # 语法
-node tests/validate-rules.mjs         # 结构校验：id 唯一 / match 语法 / resolve 字段齐全 / 正则能编译
+node tests/validate-rules.mjs         # 结构校验：id 唯一 / match 语法 / resolve 字段齐全 / 正则能编译 / 图床表字段 / 内置表与订阅表不漂移
 node tests/resolve-harness.mjs        # 解析器语义回归
 node tests/scroll-harness.mjs         # 无限滚动 + 就地替换回归
 # 3. 提交推送
@@ -262,6 +344,14 @@ CI（`.github/workflows/ci.yml`）会在每次 push / PR 上重跑这四步。**
    —— 有的话写 `endpoint`，这是最强也最省流量的策略。eporner 就是这么解的。
 4. 都不行才用 `detail` 逐张抓详情页（最慢，且要小心 hash 型页内 viewer，见下）。
 5. 边界情况（虚拟化列表、1×1 占位符懒加载）记得开 `collect.scrollToLoad`。
+
+**如果目标页是论坛/贴图板**（图由用户从外部图床贴进来），别写 `rewrite` —— 改写规律属于图床不属于站点。
+去 `hosts` 里加一条，站点规则只写 `collect` + `resolve: [{"type":"host"}, {"type":"detail", "externalOnly":true, ...}]` 就够了；
+甚至连站点规则都不必写，页面上 ≥3 张已知图床的图就会触发**通用图床论坛模式**自动接管。
+
+新增图床时**必须实测**并写下 `verified` 日期，因为「写错」不会报错（见《图床表》里的占位图一节）。
+一条图床记录要验证三件事：① 缩略图 → 原图 的真实 URL 对照；② 主机号/前缀是否必须原样保留（换个主机号是否也返回原图）；③ 图片请求带不带 Referer 的差别。
+实机验证用 `tests/live-naming.mjs` 那种「真的发请求、读回字节与像素」的方式，别只看 HTTP 200。
 
 ## eporner 的实测结论（重要，别再试 rewrite）
 
@@ -318,7 +408,7 @@ CI（`.github/workflows/ci.yml`）会在每次 push / PR 上重跑这四步。**
 
 ```bash
 node tests/validate-rules.mjs    # 规则表结构校验
-node tests/resolve-harness.mjs   # 解析器回归：假 DOM，118 项断言
+node tests/resolve-harness.mjs   # 解析器回归：假 DOM，145 项断言
 node tests/scroll-harness.mjs    # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
 node tests/live-eporner.mjs      # 真实站点端到端：需要能访问 eporner
 node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
@@ -351,9 +441,12 @@ node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑�
 | 14 | **pornpics**：`rewrite` 的结果**逐条等于锚点自身的 `href`**（线上 20/20），且结果里不再有 460 段；3 条互不相同 |
 | 15 | **pornpics 负例**：给同一条目加一条 `attr: img@src`，它会返回 1×1 占位图并骗过 `got !== thumb` 守卫 —— 这就是「pornpics 规则里不能写 attr」的实证 |
 | 16 | **pornpics 负例**：两个画廊各自的 `002`，`itemKey` 必须落在 `link:` 上，不能塌缩成 `id:002`（这就是「不能写 idAttr」的实证） |
-| 17 | **kitty-kats**：`a[href*='pixhost'], img.bbImage` 只收帖子图、排除头像；`thumb` 是 `t2` 的 thumbs 图；`link` 是 pixhost 的 show 页（去重靠它）；3 条 `itemKey` 互不相同 |
-| 18 | **kitty-kats**：`rewrite` 逐条得到 show 页里的 `img2` 地址、不再带 `/thumbs/`、3 条互不相同；且 **`t9 → img9`、`t3.pixhost.to → img3.pixhost.to`**（证明主机号与 tld 都是捕获组，不是写死的 `img2`）；非 pixhost 的缩略图不会被误改 |
-| 19 | **kitty-kats 结构性负例**：规则里**只有 `rewrite`**，没有 `probe`、没有 `attr` —— 因为 pixhost 主机号写错时返回的是**能正常 onload 的占位图**，`probe` 在此站必然误判成功 |
+| 17 | **kitty-kats**：`a[href] > img` 把帖子图与头像**都**收进来（4 条），噪音留给 resolve 滤；`link` 是图床的分享页；`itemKey` 互不相同 |
+| 18 | **图床 `host` 步骤（pixhost）**：`t2/thumbs/…` → `img2/images/…`、不再带 `/thumbs/`、结果互不相同；**`t9 → img9`、`t3.pixhost.to → img3.pixhost.to`**（主机号与 tld 都是捕获组，不是写死的 `img2`）；非 pixhost 的缩略图不会被误改 |
+| 18b | **图床 `host` 步骤（imagetwist）**：`img69/th/` → `img69/i/`；**`s10` → `s10`（绝不能猜成 `img10`）**；`img202` → `img202`；已经是 `/i/` 的原图不再改；无关域名不误伤 |
+| 19 | **kitty-kats 结构性负例**：规则里**没有 `probe`、也没有 `attr`** —— 因为 pixhost 主机号写错时返回的是**能正常 onload 的占位图**，`probe` 在此站必然误判成功；顺带钉死 `detail` 带 `externalOnly`、选择器是那 7 个、以及规则里已无内联 `rewrite` |
+| 19b | **图床表本身**：imagetwist 记着 `referrer: 'no-referrer'`、两条都有 `verified`；`findHost` 认得 `img<N>` 与 `s<N>` 两种形态与三个 pixhost tld；空 URL 不炸 |
+| 19c | **通用图床论坛模式**：合成的规则策略顺序是 `host` 在前 `detail` 在后、`collect` 是 `a[href] > img`、`detail` 带 `externalOnly`、`match` 不含任何站点域名；**页面上 3 张触发、6 张同一家图床也触发（门槛数的是「图」不是「图床」）、2 张不触发、未知域名不触发、`autoDetectHosts=false` 不触发** |
 | 20 | **全规则裸域回归**：对 4 条规则逐条钉死「裸域 / `www` / 子域」三种写法都必须命中，外加 3 条反向负例（`example.com/kitty-kats.net/`、`notpornpics.com`、`pinterest.com.evil.test`）不许误伤 —— 守住 `patternToRe` 那个静默 bug（见下） |
 
 ### patternToRe 的裸域静默 bug（v0.4.1 修复）
@@ -467,17 +560,58 @@ https://t2.pixhost.cc/thumbs/9569/751781495_ra_petalsvol54_domini_high_0001.jpg 
 这和 eporner 那次 `catimg/3_small.jpg` 事故**同型**，但更隐蔽：那次 URL 全部相同，这次 URL 各不相同，
 只有字节相同 —— 光看 URL 列表根本发现不了。
 
-所以 kitty-kats 规则**只有 `rewrite` 一条策略**，`probe` 和 `attr` 一个都没有，由 #19 用结构性断言钉死。
+所以 kitty-kats 规则里**没有 `probe`、也没有 `attr`**，由 #19 用结构性断言钉死。
 
-> **主机号写错时脚本不纠错。** `t1 → img1`，而那本身就是占位图。规则只负责按规律改写，
+> **主机号写错时脚本不纠错。** `t1 → img1`，而那本身就是占位图。图床表只负责按规律改写，
 > 不负责猜「用户其实想要 img2」—— 猜不了，因为两者都返回 200。
 
-`match` 只写 `*://*.kitty-kats.net/*`（论坛域名），**不去匹配 pixhost** —— 否则任何贴了 pixhost 图的
-网站都会套上这条规则。
+### imagetwist（2026-10-05 取证）
 
-> 取证方式：**kitty-kats 在 Cloudflare 后面**，本机（`Invoke-WebRequest` 与两个网页桥 `read_page` /
-> `web_fetch`）访问一律 HTTP 403「Sorry, you have been blocked」，整机共用一个出口，没有替代通道 ——
-> 所以条目 DOM 是请用户从浏览器 DevTools 里导出的；pixhost 本身没有反爬，那一半是自己实测的。
+同一周用户又给了一个 kitty-kats 的帖子，那个帖子 **117 张全是 ImageTwist** —— 同一个论坛、
+换个帖子，图床就不一样了。这条取证直接推翻了「一个站点一条规则」的做法，催生了 v0.5.0 的图床表。
+
+```
+缩略图  https://img69.imagetwist.com/th/71393/jsgmyvo51tmd.jpg   → 350×233 · 21199 字节
+原图    https://img69.imagetwist.com/i/71393/jsgmyvo51tmd.jpg    → 4080×2723 · 2610374 字节
+```
+
+规律：`/th/` → `/i/`，**主机名整段原样保留**。主机名有两种形态 `img<N>` 与 `s<N>`
+（实测出现过 `img202` / `img34` / `img69` / `img166` / `s10`），不能把 `s10` 猜成 `img10`。
+用户给的那个 `/i/…jpg/1__62_.jpg` 里的 `1__62_.jpg` 只是分享页的显示文件名，去掉一样能拿到原图。
+
+| 请求（同一 basename 打不同主机） | 结果 |
+|---|---|
+| `s10.…/i/71393/jpgx4n11m5n1.jpg` | 200 · **4080×2723** · 3705541 字节（真身，`s10` 上确实有这个文件） |
+| `img166.…/i/71393/fsi35sdbao4b.jpg` | 200 · **4080×2723** · 2460968 字节（真身） |
+| 该文件不存在的主机号（`img34`/`s10`/`img166`/`img69` 上查 `5isyrqx9svfh`） | 200 · **177×142** · 8183 字节 — 占位图，`/th/` 与 `/i/` 都回它 |
+
+#### ★ 第二个坑：图片请求带外来 Referer 也回占位图
+
+同一个 URL `img69.…/i/71393/jsgmyvo51tmd.jpg`：
+
+| Referer | 结果 |
+|---|---|
+| 不带 | 200 · 4080×2723 · **2610374 字节**（真身） |
+| `https://imagetwist.com/` | 200 · 4080×2723 · 2610374 字节（真身） |
+| `https://kitty-kats.net/` | 200 · `image/jpeg` · **8346 字节 · 177×142** — 占位图 |
+
+也就是说：**同一个 URL，带不带 Referer 是两个完全不同的结果，而两者都是 HTTP 200 + 合法 JPEG。**
+浏览器默认策略会给跨域图片请求带上本站 origin，所以「替换页面图片」这条路必须显式设
+`img.referrerPolicy = 'no-referrer'` —— 脚本按图床表的 `referrer` 字段自动做这件事。
+推 Eagle 不受影响（Eagle 下载时不带 Referer）。
+
+分享页 `https://imagetwist.com/<id>` 则**没有**防盗链：Referer 为 无 / kitty-kats / imagetwist
+三种都是 200 + 约 36.5KB，且页内就有原图直链
+`<img class="pic img img-responsive" src="https://img69.imagetwist.com/i/71393/<id>.jpg/1__62_.jpg">`。
+所以图床表还没收录它时，`detail` 抓分享页这条路对 imagetwist 同样成立（这也是通用图床论坛模式第 ② 步的依据）。
+
+`match` 只写 `*://*.kitty-kats.net/*`（论坛域名），**不去匹配 pixhost / imagetwist** —— 否则任何贴了
+这些图的网站都会套上这条站点规则。图床域名的匹配属于 `hosts` 表里每条记录的 `match`。
+
+> 取证方式：**kitty-kats 在 Cloudflare 后面**，`Invoke-WebRequest`（即使带完整浏览器头）一律 HTTP 403
+> 「Sorry, you have been blocked」；但插件提供的 `web_fetch` 网页桥能拿到 200 —— 帖子里的真实标记就是从它
+> 拿到的（117 张形如 `[![](https://img202.imagetwist.com/th/71393/5isyrqx9svfh.jpg)](https://imagetwist.com/5isyrqx9svfh/1__1_.jpg)`）。
+> pixhost / imagetwist 本身没有反爬，那两半是自己实测的（PowerShell 抓字节 + `System.Drawing` 解像素）。
 
 ### `scroll-harness.mjs`：虚拟化列表（Pinterest 那一类）
 
@@ -522,7 +656,10 @@ Eagle 的图重推一遍**，在素材库里堆出重复。现在重扫时命中
 | 「找到 0 个候选条目」 | `collect.item` 选择器对不上这个站的 DOM。 |
 | 「所有策略均未解析出原图」 | 原图地址不在页面源码里。点开一张大图后再点「扫描本页」。 |
 | 推送失败 / add 端点找不到 | **先看日志里的 `实际请求：` 行，确认 URL 没被拼坏**（带 token 的地址最容易踩，见上）。Eagle 没启动、或没开本地 API 也会失败。面板「设置 → 诊断接口」会把方法 × 路径的原始响应与 URL 全打出来。<br>**HTTP 405 = 路由在、方法不对**（不是服务不可用）；**404 = 路由不存在**。v2 的加素材端点是 `POST /api/v2/item/add`，旧版是 `POST /api/item/addFromURL(s)`，两套同时注册在同一个 server 上。 |
-| 推送说成功，但 Eagle 里全是同一张小图 | **先看解析来源**（日志里 `验证原图（解析来源 …）` 那一行）。<br>实测根因：**`attr` 选择器退化到整页匹配** —— 条目自己的 `img` 没有 `data-src`（懒加载占位是 `data:` URI），整页兜底就返回了文档里第一个 `img[data-src]`，也就是站点图标 `catimg/N_small.jpg`（102×75）。**这种情况下日志会显示「解析完成：N/N 张拿到原图」，完全不报错。** 现在整页兜底默认关闭，必须规则显式声明 `allowDocument: true` **且**结果与缩略图同目录才放行。<br>若解析来源正常却仍是同一张，点「**验证原图**」看带/不带 Referer 拿到的像素尺寸，判断是不是 CDN 防盗链（那时改用 **B. 替换页面图片**）。 |
+| 推送说成功，但 Eagle 里全是**同一张**小图（URL 全都一样） | **先看解析来源**（日志里 `验证原图（解析来源 …）` 那一行）。<br>实测根因：**`attr` 选择器退化到整页匹配** —— 条目自己的 `img` 没有 `data-src`（懒加载占位是 `data:` URI），整页兜底就返回了文档里第一个 `img[data-src]`，也就是站点图标 `catimg/N_small.jpg`（102×75）。**这种情况下日志会显示「解析完成：N/N 张拿到原图」，完全不报错。** 现在整页兜底默认关闭，必须规则显式声明 `allowDocument: true` **且**结果与缩略图同目录才放行。<br>若解析来源正常却仍是同一张，点「**验证原图**」看带/不带 Referer 拿到的像素尺寸，判断是不是 CDN 防盗链（那时改用 **B. 替换页面图片**）。 |
+| 收进来 / 替换后全是 **177×142** 或 **257×126** 的小图（**URL 各不相同**，所以去重拦不住） | **图床占位图。** 这两家图床拿不到原图时不返回 404，而是回 `HTTP 200` + 一张能正常解码的占位图（pixhost 主机号写错 → 257×126 / 16138 字节 `image/png`；imagetwist 主机号写错 → 177×142 / 8183 字节；**imagetwist 带外来 Referer → 177×142 / 8346 字节**）。<br>看「验证原图」的判读：**只有不带 Referer 才拿到大图 → 图床防盗链**，属于该图床的 `referrer: 'no-referrer'`（脚本替换时会自动设 `img.referrerPolicy`），推 Eagle 不受影响。<br>**只有带 Referer 才拿到大图 → 反过来**，得改成让页面自己下。<br>两种都小 → 地址解析错了（图床规律写错，比如把 `s10` 猜成 `img10`）。 |
+| 论坛帖子里图明明很多，面板却不弹 / 一张都不收 | ① 站点规则还没写 → 但页面上若有 **≥3 张**已知图床（`hosts` 表里）的图，会自动触发**通用图床论坛模式**；② 图床还没进 `hosts` 表，自动识别认不出 —— 用油猴菜单 **「通用图床论坛模式：在本页强开」**，已知图床零请求、未知的走抓分享页；③ 设置里 `autoDetectHosts` 被关了。 |
+| 论坛头像、引用的小图也被收进来了 | 合成规则的 `detail` 带了 `externalOnly: true`，只抓**外链**分享页 —— 站内链接（头像、楼层跳转）会被直接跳过。若站点规则是自己写的且没带这个字段，可以补上；或者把 `collect.item` 收窄。 |
 | Eagle 里出现重复素材，数量少于条目数 | 页面上条目数常多于画廊的实际照片数（实测 eporner：106 个条目 → 85 张照片）。脚本推送前会按原图 URL 去重，日志打 `有 21 个条目与前面的条目指向同一张原图，已跳过`。 |
 | 推送成功但图是封面 | 该站点误配了 `detail`。检查条目链接是否与当前页同 URL。 |
 | 瀑布流滚了很久，数字却停在 20 左右不动 | 该站点是**虚拟化列表**：滚出视野的 tile 会被从 DOM 里卸载，所以静态快照永远只有当前挂载的那 ~20 个。修法是给规则的 `collect` 加 `scrollToLoad: true` —— 脚本会**边走边滚、边滚边收**并按稳定 key（id / 详情页链接）累计。跨多次「扫描本页」也会继续**累加**（不再被覆盖），所以手动滚一段再扫一次同样有效。见 `tests/scroll-harness.mjs`。 |

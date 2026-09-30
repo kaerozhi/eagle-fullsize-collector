@@ -27,6 +27,19 @@ export function matchesSel(el, sel) {
 }
 
 function matchesOne(el, sel) {
+  // 支持子代组合器 `a > b`。图床论坛规则用的是 `a[href] > img` ——「缩略图外面
+  // 套着图床分享页链接」是论坛贴图的标准形态，没有 `>` 就没法测真规则。
+  // 只处理一层层向下的 `>`，够用：右侧匹配 el，左侧依次匹配它的祖先。
+  const gt = String(sel).split('>');
+  if (gt.length > 1) {
+    const right = gt.pop().trim();
+    let node = el;
+    for (let i = gt.length - 1; i >= 0; i--) {
+      node = node ? node.parentElement : null;
+      if (!node || !matchesOne(node, gt[i].trim())) return false;
+    }
+    return matchesOne(el, right);
+  }
   // 支持 .class —— pornpics 的真实规则用的是 "a.rel-link"。
   // 类名段只允许出现在标签之后、属性之前，所以不会误伤属性值里的点：
   // 像 [href*='.com'] 那种仍整体落进属性分支，不会被当成类名。
@@ -179,6 +192,7 @@ export function loadEbc({ gmGet, document: doc, location: loc } = {}) {
   src =
     src.slice(0, ci) +
     '\n  globalThis.__EBC__ = { eagle, resolveItem, readSelectorAttr, buildEndpointIndex, collectItems, pathDir, dedupeByUrl, BUILTIN_RULES, collectAll, mergeItems, itemKey, usableUrl, SCROLL, findRuleFor, applyReplacements, followPass, settings, subscriptionUrlOf, DEFAULT_SETTINGS, buildItemName, baseNameOfUrl, isWeakBase, sanitizeName,' +
+    '\n    BUILTIN_HOSTS, findHost, activeHosts, hostNames, genericGalleryRule, detectHostGallery, HOST_GALLERY_DETAIL_SELECTORS, ruleset, applyRemoteHosts,' +
     '\n    __set: (o) => { if ("resolvedCache" in o) resolvedCache = o.resolvedCache; if ("currentRule" in o) currentRule = o.currentRule; if ("accum" in o) accum = o.accum; if ("scanAbort" in o) scanAbort = o.scanAbort; },' +
     '\n    __get: () => ({ resolvedCache, accum, resolvedByKey, sentUrls, followFilled }) };\n' +
     src.slice(ci);

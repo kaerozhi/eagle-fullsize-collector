@@ -537,33 +537,44 @@ console.log('\n== 9. 按 URL 去重（106 个条目 → 85 张照片 的那个�
   // 只关心 thumb 的最小条目（给「主机号不写死」那几条用）
   const bare = (thumb) => ({ el: null, img: new El('img', {}), thumb, link: '', externalId: '' });
 
-  console.log('\n== 17. kitty-kats：只收帖子图，不收头像 ==');
+  console.log('\n== 17. kitty-kats：collect 收的是 a[href] > img（连头像一起），噪音留给 resolve 滤 ==');
   {
     const page = makeKK();
     usePage(page);
     const items = EBC.collectItems(KK);
-    ok('头像被排除，正好 3 条', items.length === 3, String(items.length));
+    // v0.5 起 collect 故意放宽成 a[href] > img —— 实测同一个论坛里用户混用多家
+    // 图床（另一个帖子 117 张全是 imagetwist），再按图床名筛就漏了。
+    // 代价是把头像这种「外层 a + img」也收进来，噪音由 detail 的 externalOnly
+    // 在 resolve 阶段挡掉（头像的 a 指向 /members/…，是站内链接）—— 见 19。
+    ok('收到 4 条（3 张帖子图 + 1 个头像）', items.length === 4, String(items.length));
+    const posts = items.filter((it) => /pixhost\.cc\/show\//.test(it.link || ''));
     ok(
-      'thumb 取的是 t2 的 thumbs 图（页面没有 data-src 系列，落在 src 上）',
-      items.length === 3 && items.every((it, i) => it.thumb === THUMB2(...SAMPLES[i])),
-      JSON.stringify(items.map((it) => it.thumb))
+      '其中 3 条是帖子图，thumb 取的是 t2 的 thumbs 图（页面没有 data-src 系列，落在 src 上）',
+      posts.length === 3 && posts.every((it, i) => it.thumb === THUMB2(...SAMPLES[i])),
+      JSON.stringify(posts.map((it) => it.thumb))
     );
     ok(
       'link 是 pixhost 的 show 页（不是图片直链，用来去重）',
-      items.length === 3 && items.every((it, i) => it.link === SHOW(...SAMPLES[i])),
-      JSON.stringify(items.map((it) => it.link))
+      posts.length === 3 && posts.every((it, i) => it.link === SHOW(...SAMPLES[i])),
+      JSON.stringify(posts.map((it) => it.link))
     );
-    ok('3 条 itemKey 互不相同', new Set(items.map((it) => EBC.itemKey(it))).size === 3);
+    ok('3 条 itemKey 互不相同', new Set(posts.map((it) => EBC.itemKey(it))).size === 3);
+    const av = items.find((it) => /\/members\//.test(it.link || ''));
+    ok(
+      '头像那条的 link 是站内链接 —— detail 的 externalOnly 会据此跳过它',
+      !!av && av.link === '/members/xericx.10184915/',
+      av && av.link
+    );
   }
 
-  console.log('\n== 18. kitty-kats：rewrite 把 thumbs 换成 images，主机号跟着走 ==');
+  console.log('\n== 18. kitty-kats：host 策略查图床表，pixhost / imagetwist 都改写成原图 ==');
   {
     const page = makeKK();
     usePage(page);
     const all = [];
     for (let i = 0; i < SAMPLES.length; i++) {
       const r = await EBC.resolveItem(kkItem(page, i), KK, freshState());
-      ok(`第 ${i + 1} 条来源是 rewrite`, r && r.via === 'rewrite', JSON.stringify(r && r.via));
+      ok(`第 ${i + 1} 条来源是 host:pixhost`, r && r.via === 'host:pixhost', JSON.stringify(r && r.via));
       ok(`第 ${i + 1} 条 === show 页里的 img2 地址`, r && r.url === FULL2(...SAMPLES[i]), r && r.url);
       ok(`第 ${i + 1} 条不再带 thumbs 段`, r && !/\/thumbs\//.test(r.url), r && r.url);
       if (r) all.push(r.url);
@@ -584,31 +595,163 @@ console.log('\n== 9. 按 URL 去重（106 个条目 → 85 张照片 的那个�
       rto && rto.url
     );
 
+    // ---- imagetwist：用户给的 kitty-kats 帖子 117 张全是它 ----
+    const itw = await EBC.resolveItem(
+      bare('https://img69.imagetwist.com/th/71393/jsgmyvo51tmd.jpg'),
+      KK,
+      freshState()
+    );
+    ok(
+      'imagetwist：/th/ → /i/，主机 img69 原样保留',
+      itw && itw.url === 'https://img69.imagetwist.com/i/71393/jsgmyvo51tmd.jpg',
+      itw && itw.url
+    );
+    const itwS = await EBC.resolveItem(
+      bare('https://s10.imagetwist.com/th/71393/jpgx4n11m5n1.jpg'),
+      KK,
+      freshState()
+    );
+    ok(
+      's<N> 形态也保留（s10 → s10，绝不能猜成 img10 —— 实测 s10 上确实有它的原图）',
+      itwS && itwS.url === 'https://s10.imagetwist.com/i/71393/jpgx4n11m5n1.jpg',
+      itwS && itwS.url
+    );
+    const itw202 = await EBC.resolveItem(
+      bare('https://img202.imagetwist.com/th/71393/5isyrqx9svfh.jpg'),
+      KK,
+      freshState()
+    );
+    ok(
+      '三位数主机号也原样保留（img202 → img202）',
+      itw202 && itw202.url === 'https://img202.imagetwist.com/i/71393/5isyrqx9svfh.jpg',
+      itw202 && itw202.url
+    );
+    const done = await EBC.resolveItem(bare('https://img69.imagetwist.com/i/71393/x.jpg'), KK, freshState());
+    ok(
+      '已经是 /i/ 的地址不会再被改一次（没有 /th/ 段就不匹配）',
+      !done.url || done.url === 'https://img69.imagetwist.com/i/71393/x.jpg',
+      JSON.stringify(done.url)
+    );
+
     const rnon = await EBC.resolveItem(bare('https://example.com/thumbs/9569/z.jpg'), KK, freshState());
-    ok('非 pixhost 的缩略图不会被误改', rnon && !/pixhost/.test(rnon.url || ''), rnon && rnon.url);
+    ok(
+      '图床表里没有的域名不会被误改（改写只认表，不猜）',
+      rnon && !/pixhost|imagetwist/.test(rnon.url || ''),
+      JSON.stringify(rnon.url)
+    );
   }
 
-  console.log('\n== 19. kitty-kats：占位图陷阱 —— 规则里绝不能出现 probe / attr ==');
+  console.log('\n== 19. kitty-kats：占位图陷阱 + 只抓外链 ==');
   {
     const types = KK.resolve.map((s) => s.type);
-    ok('rewrite 是唯一策略', types.length === 1 && types[0] === 'rewrite', JSON.stringify(types));
+    ok('策略是 host → detail 两条', types.join(' → ') === 'host → detail', JSON.stringify(types));
     ok(
       '没有 probe 步骤（占位图能正常 onload，probe 在此站必然误判成功）',
-      !KK.resolve.some((s) => s.type === 'probe')
+      !types.includes('probe')
     );
     ok(
       '没有 attr 步骤（img 的 src / data-url 都是缩略图，读出来还是缩略图）',
-      !KK.resolve.some((s) => s.type === 'attr')
+      !types.includes('attr')
     );
+
+    const detail = KK.resolve.find((s) => s.type === 'detail');
+    ok('detail 开了 externalOnly（头像/引用全是站内链接，必须跳过）', detail.externalOnly === true);
+    ok(
+      'detail 的候选里同时有 imagetwist 的 img.pic 与 pixhost 的 img#image',
+      detail.selectors.includes('img.pic@src') && detail.selectors.includes('img#image@src')
+    );
+    ok(
+      '规则不再自带 referer（实测 imagetwist / pixhost 的分享页都不挑 Referer）',
+      KK.referer === undefined,
+      String(KK.referer)
+    );
+
     // 说明：probeImage 只看 Image 的 onload，而「占位图 onload 成功」这件事需要一张
     // 真实网络响应才能复现；沙箱里的 Image 是空壳（既不 onload 也不 onerror），
     // 所以这里用结构性断言钉死不变量，而不是假装跑了一遍网络。
     const r1 = await EBC.resolveItem(bare('https://t1.pixhost.cc/thumbs/9569/z.jpg'), KK, freshState());
     ok(
-      '主机号写错时不纠错（t1 → img1，那本身就是占位图；规则只负责按规律改写）',
+      '主机号写错时不纠错（t1 → img1，那本身就是占位图；图床表只负责按规律改写）',
       r1 && r1.url === 'https://img1.pixhost.cc/images/9569/z.jpg',
       r1 && r1.url
     );
+
+    // 头像那种站内链接必须真的被 externalOnly 跳掉（不是只写在规则里好看）
+    const avHtml = { el: null, img: new El('img', {}), thumb: '', link: '/members/xericx.10184915/', externalId: '' };
+    const rav = await EBC.resolveItem(avHtml, KK, freshState());
+    ok('站内链接的头像条目解析不出任何东西（externalOnly 生效）', !rav.url, JSON.stringify(rav.url));
+  }
+
+  console.log('\n== 19b. 图床表本身：防盗链标记、verified 日期、按图片 URL 查表 ==');
+  {
+    const hosts = EBC.BUILTIN_HOSTS;
+    const itw = hosts.find((h) => h.id === 'imagetwist');
+    const px = hosts.find((h) => h.id === 'pixhost');
+    ok('imagetwist 标了 referrer: no-referrer（带外来 Referer 会拿到占位图）', !!itw && itw.referrer === 'no-referrer');
+    ok('pixhost 没标 referrer（实测它不挑 Referer）', !!px && px.referrer === undefined);
+    ok('两条都写了 verified 日期（没实测过的规律不该进表）', !!(itw.verified && px.verified));
+    ok(
+      'findHost 认 imagetwist 的两种主机形态 img<N> / s<N>',
+      !!EBC.findHost('https://s10.imagetwist.com/th/71393/a.jpg') &&
+        !!EBC.findHost('https://img202.imagetwist.com/th/71393/a.jpg')
+    );
+    ok(
+      'findHost 认 pixhost 的三个 tld',
+      ['cc', 'to', 'org'].every((t) => !!EBC.findHost(`https://t2.pixhost.${t}/thumbs/9569/a.jpg`))
+    );
+    ok('findHost 不认无关域名', EBC.findHost('https://example.com/a.jpg') === null);
+    ok('findHost 能接受空 url（不炸）', EBC.findHost('') === null);
+    // 分层是否真的做到了：站点规则里不该再留一份内联的改写规律
+    const kkStr = JSON.stringify(KK);
+    ok(
+      'kitty-kats 规则里已经没有内联的 rewrite（规律全部收进 hosts 表）',
+      !kkStr.includes('img$1') && !kkStr.includes('pixhost.cc/images'),
+      kkStr.slice(0, 120)
+    );
+  }
+
+  console.log('\n== 19c. 通用图床论坛模式：不认站点，只认图床 ==');
+  {
+    const g = EBC.genericGalleryRule();
+    ok(
+      '通用规则也是先查表、再抓分享页',
+      g.resolve.map((s) => s.type).join(' → ') === 'host → detail',
+      JSON.stringify(g.resolve.map((s) => s.type))
+    );
+    ok('通用规则的 collect 是 a[href] > img', g.collect.item === 'a[href] > img');
+    ok('通用规则的 detail 也开 externalOnly', g.resolve[1].externalOnly === true);
+    ok(
+      '通用规则不含任何站点专属 match（就是 *://*/*，靠图床而非域名触发）',
+      JSON.stringify(g.match) === JSON.stringify(['*://*/*'])
+    );
+
+    // 「页面上 ≥3 张已知图床的图」是自动启用**唯一**的依据：
+    // 门槛太低会在随便哪个网站上乱弹面板，太高则漏掉小帖子。
+    const mkGallery = (n, urlOf) => {
+      const b = new El('body');
+      for (let i = 0; i < n; i++) {
+        const a = new El('a', { href: `https://imagetwist.com/x${i}` });
+        a.appendChild(new El('img', { src: urlOf(i) }));
+        b.appendChild(a);
+      }
+      return { body: b, anchors: [] };
+    };
+    usePage(mkGallery(3, (i) => `https://img69.imagetwist.com/th/71393/a${i}.jpg`));
+    ok('3 张已知图床的图 → 自动启用', !!EBC.detectHostGallery());
+    // ★ 门槛数的是**图**不是**图床**：用户那个帖子的 117 张全是同一家（imagetwist），
+    //   若按「至少 3 家不同图床」算，最典型的场景反而永远不会触发。
+    usePage(mkGallery(6, (i) => `https://img69.imagetwist.com/th/71393/a${i}.jpg`));
+    ok('6 张全是同一家图床也照样启用（门槛数图，不数图床）', !!EBC.detectHostGallery());
+    usePage(mkGallery(5, (i) => `https://img69.imagetwist.com/th/71393/a${i}.jpg`));
+    ok('5 张也启用', !!EBC.detectHostGallery());
+    usePage(mkGallery(2, (i) => `https://img69.imagetwist.com/th/71393/a${i}.jpg`));
+    ok('只有 2 张 → 不启用（门槛是 3）', EBC.detectHostGallery() === null);
+    usePage(mkGallery(5, (i) => `https://unknown-host.test/th/a${i}.jpg`));
+    ok('5 张但图床表里没有 → 不启用（只认表，不猜站点结构）', EBC.detectHostGallery() === null);
+    EBC.settings.autoDetectHosts = false;
+    usePage(mkGallery(5, (i) => `https://img69.imagetwist.com/th/71393/a${i}.jpg`));
+    ok('设置里关掉 autoDetectHosts → 一律不启用', EBC.detectHostGallery() === null);
+    EBC.settings.autoDetectHosts = true;
   }
 }
 

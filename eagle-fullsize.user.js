@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.4.1
+// @version      0.5.0
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.4.1';
+  const VERSION = '0.5.0';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -84,7 +84,25 @@
     // 渲染结果为空、或结果本身没有信息量（纯哈希 / 纯数字 / image、photo 这种通用名）
     // 时自动兜底成「页面标题-序号」，**绝不返回空串**。
     nameTemplate: '{basename}',
+    // 通用图床论坛模式：站点规则没命中时，如果页面上有 ≥3 张来自「图床表」
+    // 里已知图床的图，就自动按图床表启用。用户实测的场景是论坛里用户可以
+    // 从任意免费图床贴图 —— 那种页面没法为每家图床写站点规则，只能按图床认。
+    autoDetectHosts: true,
   };
+
+  // 各家图床**分享页**里的原图选择器，按「最可能命中」排序，取不到就继续往下试。
+  // 用户实测的场景（论坛）：帖子里的图是用户从各种免费图床贴进来的，所以站点规则
+  // 不可能把它们一一列全 —— 只能拿缩略图外面的那个 `<a href>` 去抓分享页。
+  // 实测：imagetwist 的分享页是 <img class='pic' src='…/i/…'>，pixhost 是 <img id='image'>。
+  const HOST_GALLERY_DETAIL_SELECTORS = [
+    "meta[property='og:image']@content",
+    'img.pic@src', // imagetwist
+    'img#image@src', // pixhost / imagebam
+    'img.centered@src', // imagevenue
+    '#image-container img@src',
+    '.image-view img@src',
+    'img@src',
+  ];
 
   // 内置默认规则表（离线可用）。远程订阅会按 id 覆盖它。
   const BUILTIN_RULES = [
@@ -227,47 +245,48 @@
     },
     {
       id: 'kitty-kats',
-      name: 'Kitty-Kats 论坛（pixhost 图床）',
+      name: 'Kitty-Kats 论坛（图床由 hosts 表决定）',
       enabled: true,
       match: ['*://*.kitty-kats.net/*'],
-      referer: 'https://kitty-kats.net/',
       collect: {
-        // 实测（用户从真实浏览器导出的 DOM）：帖子图长这样 ——
+        // 实测（用户从真实浏览器导出的 DOM + 联网复测）：帖子图长这样 ——
         //   <a href='https://pixhost.cc/show/9569/<id>_<name>.jpg'>
-        //     <img class='bbImage' src='https://t2.pixhost.cc/thumbs/9569/<id>_<name>.jpg'
-        //          data-url='…同一个缩略图地址'>
+        //     <img class='bbImage' src='https://t2.pixhost.cc/thumbs/9569/<id>_<name>.jpg'>
         //   </a>
-        // 外层 a 指向 pixhost 的 show 页（不是图片直链），所以要两跳。
-        // 两个选择器命中的是同一批图：前者精确拿到外层 a（link 可靠），后者兜住没有
-        // 外层 a 的帖子图；itemKey 会按外层 a 的 href 去重，不会重复收集。
-        item: "a[href*='pixhost'], img.bbImage",
-        img: 'img',
-        link: 'self',
-        scrollToLoad: true,
+        // 外层 a 指向图床的**分享页**（不是图片直链），所以要两跳。
+        // 两个选择器命中的是同一批图：前者拿到外链可靠的帖子图，后者兜住没有外层 a
+        // 的；itemKey 会按外层 a 的 href 去重，不会重复收集。
+        // ★ 故意不再按图床名筛（原来的 a[href*='pixhost']）—— 实测同一个论坛里
+        //   用户混用多家图床（另一个帖子 117 张全是 imagetwist）。
+        item: 'a[href] > img, img.bbImage',
+        img: 'self',
       },
-      // 实测结论（2026-09-30，对 pixhost 的联网实测）：
-      //   show 页里的 <img id='image'> 给出真身：
-      //     https://img2.pixhost.cc/images/9569/<id>_<name>.jpg  → 2811x4000
-      //   而缩略图 t2.pixhost.cc/thumbs/… 是 210x300。
-      //   规律：t<N>.pixhost.<tld>/thumbs/  ⇄  img<N>.pixhost.<tld>/images/，
-      //   路径其余部分逐字节相同，**主机号必须原样保留**
-      //   （3 张图逐一对照 show 页确认，3/3 都是 t2 → img2）。
-      // ★★ 最容易致命的坑：主机号写错**不会 404**，而是返回一张占位图。
-      //   img1 / img3 / img4 与 t1 / t3 全部 HTTP 200 + image/png，且都是同一个
-      //   16138 字节、257x126 的 PNG（多个地址 sha 去重后只剩 1 个）。
-      //   而 probe 策略靠 Image() 的 onload 判成功 —— 占位图能正常 onload，
-      //   于是 probe 在此站**必然误判成功**，把整页推成一堆一模一样的占位图，
-      //   而日志还报「N/N 张拿到原图」。这与 eporner 那次 catimg/3_small.jpg 事故
-      //   同型，而且更隐蔽（URL 各不相同，只有字节相同）。
-      //   → 所以本规则只用 rewrite，绝不写 probe。
-      // ★ 也故意不写 attr：img 的 src 与 data-url 都是缩略图地址，读出来还是缩略图。
+      // v0.5 起这条规则**瘦身成一条薄绑定**：改写规律全部移进 hosts（图床表，
+      // 见 2.5 节），resolve 只剩 host + detail。理由：同一个论坛混用多家图床，
+      // 把某一家的改写规律写进站点规则是错的分层。
+      // 历史实测结论（2026-09-30，对 pixhost 的联网实测）：show 页里的 <img id='image'>
+      //   给出真身 https://img2.pixhost.cc/images/9569/<id>_<name>.jpg → 2811x4000，
+      //   而缩略图 t2.pixhost.cc/thumbs/… 是 210x300；规律 t<N>/thumbs/ ⇄ img<N>/images/，
+      //   主机号必须原样保留。★★ 主机号写错**不会 404**，而是一张 16138 字节 257x126 的
+      //   占位图（HTTP 200 + image/png），所以 probe 在此站必然误判成功 —— 规律全部
+      //   收进 hosts 表并只用改写，绝不写 probe。★ 也故意不写 attr：img 的 src 与
+      //   data-url 都是缩略图地址，读出来还是缩略图。
       resolve: [
+        // ① 已知图床：查图床表，零请求改写
+        { type: 'host' },
+        // ② 表格里还没收录的图床：抓外层 a 那个分享页，从里面读原图直链。
+        //    实测 imagetwist / pixhost 的分享页都不挑 Referer（无 / 本站 / 图床自己
+        //    三种都是 HTTP 200 且含原图直链），所以这里不设 referer。
+        //    externalOnly 挡噪音：帖子里的头像/引用全是站内链接，只有用户贴的
+        //    图床分享页是外链。
         {
-          type: 'rewrite',
-          // .cc / .to / .org 都接受：实测 pixhost.cc 与 pixhost.to 返回同一张 show 页。
-          rules: [{ re: '//t(\\d+)\\.pixhost\\.(cc|to|org)/thumbs/', to: '//img$1.pixhost.$2/images/' }],
+          type: 'detail',
+          excludeThumb: true,
+          externalOnly: true,
+          selectors: HOST_GALLERY_DETAIL_SELECTORS,
         },
       ],
+      delayMs: 150,
     },
   ];
 
@@ -357,6 +376,80 @@
   }
 
   /* ============================================================
+   * 2.5 图床表：缩略图 → 原图 的改写规律，按图床而不是按站点
+   *
+   * 为什么不按站点写（用户实测，kitty-kats 这类「用户可以自由发图的论坛」）：
+   * 帖子里的图是用户从各种免费图床贴进来的，同一个帖子就可能混用好几家，
+   * 所以「为这个论坛写一条规则」从根上就不成立 —— 得认**图床**。
+   *
+   * 为什么必须用「改写」而不是「实测哪个能下」：
+   * 这两家图床拿不到原图时**都不返回 404**，而是返回 HTTP 200 + 一张能正常
+   * 解码的 JPEG 占位图：
+   *   · imagetwist：主机号写错 或 图片请求带了外来 Referer → 177x142 / 8183~8346 字节
+   *   · pixhost   ：主机号写错                            → 257x126 / 16138 字节
+   * 也就是说 probe 这类「加载成功就算命中」的策略在这里**必然误判成功**，
+   * 只会把一堆占位图塞进 Eagle，而日志看起来一切正常。只能靠既知规律改写。
+   *
+   * 结构：
+   *   match    []    命中该图床图片 URL 的 glob（与站点规则的 match 同语法）
+   *   thumbRe  ''    缩略图 URL 的正则（捕获组可用 $1 引用）
+   *   fullTo   ''    替换成原图 URL 的模板，$1 引用 thumbRe 的捕获组
+   *   referrer ''    可选。填 'no-referrer' 表示该图床**必须不带 Referer** 才给原图
+   *                  （就地替换页面图片时脚本会照着设 img.referrerPolicy）
+   *   verified ''    这条规律最后一次实机验证的日期。留空 = 没实测过，别信
+   * ============================================================ */
+
+  const BUILTIN_HOSTS = [
+    {
+      id: 'pixhost',
+      name: 'pixhost',
+      enabled: true,
+      match: ['*://*.pixhost.cc/*', '*://*.pixhost.to/*', '*://*.pixhost.org/*'],
+      thumbRe: '//t(\\d+)\\.pixhost\\.(cc|to|org)/thumbs/',
+      fullTo: '//img$1.pixhost.$2/images/',
+      verified: '2026-09-30',
+    },
+    {
+      id: 'imagetwist',
+      name: 'ImageTwist',
+      enabled: true,
+      match: ['*://*.imagetwist.com/*'],
+      // ★ 主机前缀（img69 / img202 / s10 …）和它的数字必须**原样保留**：
+      //   换一个主机号不会 404，只会给一张 177x142 的占位图。
+      thumbRe: '//((?:img|s)\\d+)\\.imagetwist\\.com/th/',
+      fullTo: '//$1.imagetwist.com/i/',
+      // ★ 实测：带外来 Referer（哪怕只是 origin）→ HTTP 200 + 8346 字节 177x142
+      //   占位图；不带 Referer → 2610374 字节 4080x2723 原图。
+      referrer: 'no-referrer',
+      verified: '2026-10-05',
+    },
+  ];
+
+  function activeHosts() {
+    return (ruleset.hosts || []).filter((h) => h.enabled !== false);
+  }
+
+  /**
+   * 按**图片 URL**（不是页面 URL）查图床表。查不到返回 null。
+   * 站点规则只负责「页面上哪些节点是帖子图」，具体怎么拿到原图交给图床表。
+   */
+  function findHost(url) {
+    if (!url) return null;
+    for (const h of activeHosts()) {
+      try {
+        if (matchAny(url, h.match)) return h;
+      } catch (e) {
+        /* 单条记录写错不该拖垮整页 */
+      }
+    }
+    return null;
+  }
+
+  function hostNames() {
+    return activeHosts().map((h) => h.name || h.id).join('、');
+  }
+
+  /* ============================================================
    * 3. 规则表加载与合并
    * ============================================================ */
 
@@ -375,8 +468,15 @@
     version: 0,
     updated: '',
     rules: mergeRules(BUILTIN_RULES, store.get('localRules', [])),
+    // 图床表与站点规则分开维护：加一家图床只动 hosts，所有站点规则同时受益。
+    hosts: mergeRules(BUILTIN_HOSTS, store.get('localHosts', [])),
     remote: null,
   };
+
+  function applyRemoteHosts(data) {
+    if (!data || !Array.isArray(data.hosts)) return;
+    ruleset.hosts = mergeRules(BUILTIN_HOSTS, data.hosts.concat(store.get('localHosts', [])));
+  }
 
   function activeRules() {
     return ruleset.rules.filter((r) => r.enabled !== false);
@@ -420,8 +520,12 @@
       if (!data || !Array.isArray(data.rules)) throw new Error('订阅内容不含 rules 数组');
       ruleset.remote = data;
       ruleset.rules = mergeRules(data.rules, store.get('localRules', []));
+      applyRemoteHosts(data);
       store.set('subCache', { at: Date.now(), data });
-      if (!silent) log(`订阅已更新：${data.rules.length} 条规则（${data.updated || '未标日期'}）`, 'ok');
+      if (!silent) {
+        const nh = (data.hosts || []).length;
+        log(`订阅已更新：${data.rules.length} 条站点规则${nh ? ` + ${nh} 条图床规则` : ''}（${data.updated || '未标日期'}）`, 'ok');
+      }
       renderStatus();
       return true;
     } catch (e) {
@@ -430,6 +534,7 @@
       if (cached && cached.data) {
         ruleset.remote = cached.data;
         ruleset.rules = mergeRules(cached.data.rules, store.get('localRules', []));
+        applyRemoteHosts(cached.data);
         log(`订阅拉取失败（${e.message}），已回退到缓存版本。`, 'warn');
       } else {
         log(`订阅拉取失败（${e.message}），继续使用内置规则。`, 'error');
@@ -1323,6 +1428,21 @@
         continue;
       }
 
+      // ---- host：查图床表改写，纯本地、零请求 ----
+      //
+      // 与 rewrite 的区别：rewrite 把规律写死在**站点规则**里（只对这个站生效），
+      // host 把规律放在**图床表**里（所有站点共享）。论坛那种「用户从各种免费
+      // 图床贴图」的场景只能走这条 —— 见 2.5 节。
+      if (step.type === 'host') {
+        if (!thumb) continue;
+        const h = findHost(thumb);
+        if (!h) continue;
+        if (!h.thumbRe || !h.fullTo) continue;
+        const got = applyRewrite(thumb, [{ re: h.thumbRe, to: h.fullTo }]);
+        if (got && got !== thumb) return { url: got, via: 'host:' + h.id, thumb, hostId: h.id };
+        continue;
+      }
+
       // ---- probe：候选实测（只在第一张上定胜负，整页复用） ----
       if (step.type === 'probe') {
         if (!thumb) continue;
@@ -1331,17 +1451,37 @@
         const key = rule.id + '|probe';
         let winner = state.probeWinner;
         if (winner === undefined) {
+          // 缩略图自己的像素尺寸，用来判「这个候选到底有没有变大」
+          const tw = (item.img && (item.img.naturalWidth || item.img.width)) || 0;
+          const th = (item.img && (item.img.naturalHeight || item.img.height)) || 0;
           // 逐个实测，第一个成功者胜出
           for (let i = 0; i < cands.length; i++) {
             const u = applyRewrite(thumb, [cands[i]]);
             if (!u || u === thumb) continue;
             const ok = await probeImage(u);
-            if (ok) {
-              winner = i;
-              state.probeWinner = i;
-              log(`probe 命中候选 #${i + 1}：${shortUrl(u)}`, 'ok');
-              return { url: u, via: `probe#${i + 1}`, thumb };
+            if (!ok) continue;
+            // ★ 占位图守卫 —— 不设这道关，probe 在主流图床上就是必然误判。
+            //
+            //   实测（两家的「拿不到原图」都不是 404，而是 HTTP 200 + 一张能正常
+            //   解码的 JPEG 占位图，所以 onload 一定成功）：
+            //     · imagetwist：主机号写错 / 带外来 Referer → 177x142，8183~8346 字节
+            //     · pixhost   ：主机号写错                    → 257x126，16138 字节
+            //   判据两条，都很朴素：原图必须**比缩略图大**，且不至于小到 200px 以下。
+            const tooSmall = ok.width < 200 || ok.height < 200;
+            const notBigger = tw > 0 && th > 0 && ok.width * ok.height <= tw * th;
+            if (tooSmall || notBigger) {
+              log(
+                `probe 候选 #${i + 1} 被「占位图守卫」拒绝：${shortUrl(u)} 只有 ${ok.width}x${ok.height}` +
+                  (tw ? `（缩略图 ${tw}x${th}）` : '') +
+                  ' —— 这类图床拿不到原图时会回一张同样能解码的占位图，光看「加载成功」会全收成小图。',
+                'warn'
+              );
+              continue;
             }
+            winner = i;
+            state.probeWinner = i;
+            log(`probe 命中候选 #${i + 1}：${shortUrl(u)}（${ok.width}x${ok.height}）`, 'ok');
+            return { url: u, via: `probe#${i + 1}`, thumb };
           }
           state.probeWinner = -1;
           continue;
@@ -1377,6 +1517,17 @@
       // ---- detail：抓详情页 ----
       if (step.type === 'detail') {
         if (!item.link) continue;
+        // 可选的「只抓外链」守卫，专治论坛帖子里 <a href> 满地都是这件事：
+        // 头像、引用、楼层链接全是**站内**链接，只有用户贴进来的图床分享页是外链。
+        // 实测 kitty-kats：帖子图的外层 a 指向 imagetwist.com / pixhost.cc，
+        // 而头像指向 /members/…。跳过同站链接就把噪音一次滤干净了。
+        if (step.externalOnly) {
+          try {
+            if (new URL(item.link, location.href).hostname === location.hostname) continue;
+          } catch (e) {
+            /* 解析不了就当成外链 */
+          }
+        }
         if (state.detailDisabled && state.detailDisabledFor === rule.id) {
           continue;
         }
@@ -2135,6 +2286,7 @@
         { label: '带 Referer（= 本站页）', headers: { Referer: location.href } },
         { label: '不带 Referer（≈ Eagle 自己下）', headers: {} },
       ];
+      const seen = [];
       for (const t of tries) {
         try {
           const r = await gmGet(first.url, { headers: t.headers, responseType: 'blob', timeout: 25000 });
@@ -2143,18 +2295,41 @@
           const ct = headerValue(r, 'content-type') || (blob && blob.type) || '(未知类型)';
           const level = r.status >= 200 && r.status < 300 && size > 20000 ? 'ok' : 'warn';
           log(`${t.label} → HTTP ${r.status}｜${ct}｜${size} 字节`, level);
+          let dim = null;
           if (blob && blob.size && /image\//i.test(ct)) {
-            const d = await imageSize(blob);
-            log(`  ↳ 实际像素 ${d.w}×${d.h}`, d.w >= 700 ? 'ok' : 'error');
+            dim = await imageSize(blob);
+            log(`  ↳ 实际像素 ${dim.w}×${dim.h}`, dim.w >= 700 ? 'ok' : 'error');
           }
+          seen.push({ label: t.label, status: r.status, size, dim });
         } catch (e) {
           log(`${t.label} → 异常 ${e.message}`, 'error');
+          seen.push({ label: t.label, err: e.message });
         }
       }
-      log(
-        '判读：两种都拿到大尺寸图 → 地址没问题，问题在 Eagle 侧；只有带 Referer 才行 → 防盗链，要换下载方式。',
-        'info'
-      );
+      // 判读必须**两种都看**才能定性。2026-10-05 实测 imagetwist 属于第三支：
+      // 带本站 Referer → HTTP 200 + 177x142 占位图（能正常解码，不报错），
+      // 不带 Referer → 4080x2723 原图。只看「加载成功/字节数」会完全看错。
+      const big = (x) => !!(x && x.dim && x.dim.w >= 700 && x.dim.h >= 700);
+      const [withRef, withoutRef] = seen;
+      log('判读：', 'info');
+      if (big(withRef) && big(withoutRef)) {
+        log('  · 两种都拿到大尺寸图 → 地址没问题，问题在 Eagle 侧。', 'info');
+      } else if (!big(withRef) && big(withoutRef)) {
+        log(
+          '  · 只有**不带** Referer 才是大图 —— 图床防盗链（带外来 Referer 会回一张同样能解码的占位图，' +
+            'HTTP 200，完全不报错）。推 Eagle 不受影响（Eagle 下载不带 Referer）；' +
+            '但「替换页面图片」必须给 img 设 referrerPolicy=no-referrer。' +
+            '图床表里标了 referrer 的图床，脚本替换时会自动设。',
+          'warn'
+        );
+      } else if (big(withRef) && !big(withoutRef)) {
+        log('  · 只有**带** Referer 才是大图 → 防盗链，得让下载端带上 Referer。', 'warn');
+      } else {
+        log(
+          '  · 两种都拿不到大图 → 多半是地址解析错了，或者这个主机号上根本没有这张图。',
+          'error'
+        );
+      }
     };
 
     return els;
@@ -2487,6 +2662,7 @@
     }
     let n = 0;
     let dupes = 0;
+    let noRef = 0;
     const usedUrl = new Set();
     for (const it of items) {
       if (!it.img) continue;
@@ -2502,6 +2678,16 @@
         it.img.removeAttribute('data-srcset');
         it.img.removeAttribute('data-src');
         it.img.removeAttribute('sizes');
+        // ★ 防盗链图床：浏览器默认策略会给跨域图片请求带上本站 origin 当 Referer。
+        //   而 imagetwist 实测「带外来 Referer → HTTP 200 + 177x142 占位图，
+        //   不带 Referer → 4080x2723 原图」。所以对这类图床必须显式声明
+        //   no-referrer，否则「替换页面图片」这条路会当场把缩略图换成占位图 ——
+        //   而且不报任何错。判据从**原图 URL** 反查图床表，host / detail 两条路都覆盖。
+        const h = findHost(url);
+        if (h && h.referrer) {
+          it.img.referrerPolicy = h.referrer;
+          noRef++;
+        }
         it.img.loading = 'eager';
         it.img.src = url;
         it.img.setAttribute('data-ebc-full', url);
@@ -2513,6 +2699,13 @@
     if (!quiet) {
       if (n) {
         log(`已把 ${n} 张缩略图替换为原图。现在用 Eagle 官方扩展的「批量收藏」即可。`, 'ok');
+        if (noRef) {
+          log(
+            `其中 ${noRef} 张来自防盗链图床，已把 img.referrerPolicy 设成 no-referrer ——` +
+              '这类图床只要请求带上本站 Referer 就回占位图（HTTP 200，不报错）。',
+            'info'
+          );
+        }
         if (dupes) {
           log(
             `其中 ${dupes} 个 tile 与别的 tile 指向**同一张原图**（Pinterest 推荐流会重复推同一个 pin）——` +
@@ -2709,6 +2902,82 @@
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
+  /* ============================================================
+   * 11. 通用图床论坛模式：不认站点，只认图床
+   * ============================================================ */
+
+  // 页面上至少要有这么多张「来自已知图床」的图，才自动启用。
+  // 宁可漏，也绝不在随便哪个网站上乱弹面板。
+  const HOST_AUTODETECT_MIN = 3;
+
+  /**
+   * 一条「不认站点、只认图床」的规则。
+   *
+   * 用户实测的场景（kitty-kats 这类「用户可以自由发图的论坛」）：帖子里的图是
+   * 用户从各种免费图床贴进来的，所以**没法为每家图床写一条站点规则** —— 甚至
+   * 同一个帖子就混用好几家。这里的做法是反过来：不认站点，只认图床表。
+   *
+   *   collect：`a[href] > img` —— 缩略图外面套着图床的分享页链接（论坛贴图的标准形态）
+   *   resolve：① host   查图床表 → 零请求改写（已知图床）
+   *            ② detail 抓那个分享页，从里面读出原图直链（未知图床的兜底）
+   *
+   * ② 是万能的：不管哪家图床，它的分享页里一定有原图直链（实测 imagetwist 的
+   * 分享页就含 <img class="pic" src="https://img69.imagetwist.com/i/…">），
+   * 代价是每张图多一次请求。所以已知图床走 ①，只有 ① 不认识时才回落到 ②。
+   */
+  function genericGalleryRule() {
+    return {
+      id: '__auto-gallery',
+      name: '通用图床论坛页（按图床识别）',
+      enabled: true,
+      match: ['*://*/*'],
+      collect: { item: 'a[href] > img', img: 'self' },
+      resolve: [
+        { type: 'host' },
+        {
+          type: 'detail',
+          excludeThumb: true,
+          externalOnly: true,
+          selectors: HOST_GALLERY_DETAIL_SELECTORS,
+        },
+      ],
+      delayMs: 150,
+    };
+  }
+
+  /**
+   * 这个页面上有没有「一批来自已知图床的缩略图」。
+   * 这是自动启用通用模式的唯一依据 —— 只认图床表，不猜站点结构。
+   */
+  let detectedHostIds = [];
+  function detectHostGallery() {
+    if (settings.autoDetectHosts === false) return null;
+    if (!activeHosts().length) return null;
+    const seen = new Set();
+    const ids = new Set();
+    let hits = 0;
+    for (const img of document.querySelectorAll('a[href] > img')) {
+      const u =
+        img.getAttribute('data-src') ||
+        img.getAttribute('data-original') ||
+        img.currentSrc ||
+        img.src ||
+        '';
+      if (!/^https?:/i.test(u) || seen.has(u)) continue;
+      seen.add(u);
+      const h = findHost(u);
+      if (h) {
+        ids.add(h.id);
+        hits++; // ★ 门槛数的是**图**，不是图床数 —— 用户那个帖子 117 张全是 imagetwist
+      }
+      if (hits >= HOST_AUTODETECT_MIN) {
+        detectedHostIds = Array.from(ids);
+        return genericGalleryRule();
+      }
+    }
+    return null;
+  }
+
   function boot() {
     // 尽早挂钩网络请求，才能抓到页内 viewer 自己发的数据请求
     sniff.install();
@@ -2717,10 +2986,22 @@
     if (cached && cached.data && Array.isArray(cached.data.rules)) {
       ruleset.remote = cached.data;
       ruleset.rules = mergeRules(cached.data.rules, store.get('localRules', []));
+      applyRemoteHosts(cached.data);
     }
     loadSubscription(true);
 
     currentRule = findRuleFor(location.href);
+
+    // 站点规则没命中时退一步：按**图床**认（见 11 节）。
+    // 论坛里用户从各种免费图床贴图，"为这个站点写规则"从根上不成立。
+    let autoDetected = false;
+    if (!currentRule && !settings.learnMode) {
+      const auto = detectHostGallery();
+      if (auto) {
+        currentRule = auto;
+        autoDetected = true;
+      }
+    }
 
     if (typeof GM_registerMenuCommand === 'function') {
       GM_registerMenuCommand('打开 Eagle 大图采集面板', () => {
@@ -2736,13 +3017,41 @@
         buildUI();
         toggleLearn();
       });
+      // 页面上的图床还没进「图床表」时，用这个手动开一把：
+      // 已知图床零请求改写，没收录的会去抓分享页（每张一次请求，慢但能拿到）。
+      GM_registerMenuCommand('通用图床论坛模式：在本页强开', () => {
+        currentRule = genericGalleryRule();
+        buildUI();
+        renderStatus();
+        log(
+          '已强制启用「通用图床论坛页」模式：采集 a[href] > img —— 先查图床表（零请求），' +
+            '表格里没有的图床会去抓分享页取原图。',
+          'info'
+        );
+        scan();
+      });
     }
 
     // 只在命中规则、或开了学习模式时才自动弹面板 —— 避免污染所有网站
     if (currentRule || settings.learnMode) {
       if (settings.autoOpenPanel || settings.learnMode) {
         buildUI();
-        log(`Eagle 大图采集 v${VERSION} 就绪。${currentRule ? '命中规则：' + currentRule.name : '（未命中规则）'}`);
+        log(
+          `Eagle 大图采集 v${VERSION} 就绪。${
+            currentRule
+              ? (autoDetected ? '按图床自动识别：' : '命中规则：') + currentRule.name
+              : '（未命中规则）'
+          }`
+        );
+        if (autoDetected) {
+          log(
+            `本页没有站点规则，但有多张来自 ${
+              detectedHostIds.length ? detectedHostIds.join('、') : hostNames()
+            } 的图 —— 已按图床表接管。` +
+              '图床表在 rules/default.json 的 hosts 里，加一行就能多支持一家。',
+            'ok'
+          );
+        }
         renderStatus();
         if (!autoScanned && currentRule) {
           autoScanned = true;

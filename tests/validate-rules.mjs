@@ -18,12 +18,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const file = resolve(here, '..', 'rules', 'default.json');
 
 /** resolve 管线的合法策略。新增策略时必须同步这里，否则新规则会被误判为非法。 */
-const STEP_TYPES = new Set(['attr', 'rewrite', 'endpoint', 'pagedata', 'probe', 'detail']);
+const STEP_TYPES = new Set(['attr', 'rewrite', 'host', 'endpoint', 'pagedata', 'probe', 'detail']);
 
 /** 每种策略必须带的字段。写在这里，让「少写字段」在 CI 里就红，而不是等到用户报告。 */
 const STEP_REQUIRED = {
   attr: ['selectors'],
   rewrite: ['rules'],
+  host: [],
   probe: ['candidates'],
   detail: ['selectors'],
   endpoint: ['url', 'vars'],
@@ -175,6 +176,108 @@ for (const [i, r] of (Array.isArray(data.rules) ? data.rules : []).entries()) {
       }
     }
   }
+}
+
+// ---- 图床表（顶层 hosts）守门人 ----
+// 存在的理由：v0.5.0 把「缩略图 → 原图」的改写规律从站点规则里抽出来，做成了
+// 所有站点共享的图床表。这张表的每一条都是**实测出来的**（这些图床拿不到原图时
+// 不返回 404，而是回一张能正常解码的占位图，所以规律写错不会报错，只会静默地把
+// 整页收成占位图）。所以字段缺失 / 正则写坏必须在 CI 里红，而不是等用户发现
+// 库里全是一模一样的小图。
+const REFERRER_POLICIES = new Set([
+  'no-referrer',
+  'no-referrer-when-downgrade',
+  'origin',
+  'origin-when-cross-origin',
+  'same-origin',
+  'strict-origin',
+  'strict-origin-when-cross-origin',
+  'unsafe-url',
+]);
+
+const hostIds = new Set();
+if (data.hosts !== undefined) {
+  if (!Array.isArray(data.hosts) || !data.hosts.length) {
+    problems.push('顶层 hosts 若存在，必须是非空数组');
+  } else {
+    for (const [i, h] of data.hosts.entries()) {
+      const at = `hosts[${i}]${h && isStr(h.id) ? ` (${h.id})` : ''}`;
+      if (!h || typeof h !== 'object' || Array.isArray(h)) {
+        problems.push(`${at}: 必须是对象`);
+        continue;
+      }
+      if (!isStr(h.id)) problems.push(`${at}: 缺少非空 id`);
+      else if (hostIds.has(h.id)) problems.push(`${at}: id 与前面的图床重复`);
+      else hostIds.add(h.id);
+
+      if (!isStr(h.name)) warn.push(`${at}: 建议补 name（面板/日志里显示它）`);
+
+      // match：命中该图床**图片 URL** 的 glob
+      if (!Array.isArray(h.match) || !h.match.length) {
+        problems.push(`${at}: match 必须是非空数组（匹配图片 URL，语法同站点规则）`);
+      } else {
+        for (const [j, m] of h.match.entries()) {
+          if (!isStr(m)) problems.push(`${at}.match[${j}]: 必须是非空字符串`);
+          else if (!/^(\*|https?|file):\/\//.test(m)) {
+            problems.push(`${at}.match[${j}]: 必须以 *:// 或 http(s):// 开头（现在是 ${JSON.stringify(m)}）`);
+          }
+        }
+      }
+
+      // thumbRe / fullTo
+      if (!isStr(h.thumbRe)) problems.push(`${at}: 缺少 thumbRe`);
+      else {
+        try {
+          new RegExp(h.thumbRe);
+        } catch (e) {
+          problems.push(`${at}.thumbRe: 不是合法正则（${e.message}）`);
+        }
+      }
+      if (!isStr(h.fullTo)) problems.push(`${at}: 缺少 fullTo`);
+      // fullTo 用了 $1 就必须真有捕获组，否则 $1 会字面出现在 URL 里 ——
+      // 那是个**静默失败**：地址看着对，实际 404 或拿到占位图。
+      if (isStr(h.fullTo) && /\$\d/.test(h.fullTo) && isStr(h.thumbRe)) {
+        if (!/\((?!\?:)/.test(h.thumbRe)) {
+          problems.push(`${at}: fullTo 用了 $1 但 thumbRe 里没有捕获组`);
+        }
+      }
+
+      if (h.referrer !== undefined && !REFERRER_POLICIES.has(h.referrer)) {
+        problems.push(`${at}.referrer: ${JSON.stringify(h.referrer)} 不是合法的 ReferrerPolicy`);
+      }
+      if (!isStr(h.verified)) {
+        warn.push(`${at}: 没写 verified 日期 —— 没实测过的规律别当真`);
+      }
+    }
+  }
+} else {
+  problems.push('顶层缺少 hosts 图床表');
+}
+
+// 站点规则里的 host 步骤要有表可查
+for (const [i, r] of (Array.isArray(data.rules) ? data.rules : []).entries()) {
+  for (const [j, s] of (Array.isArray(r && r.resolve) ? r.resolve : []).entries()) {
+    if (s && s.type === 'host' && !hostIds.size) {
+      problems.push(`rules[${i}].resolve[${j}]: 用了 host 策略，但 hosts 表是空的`);
+    }
+  }
+}
+
+// 内置表与订阅表不能漂移：订阅里新加的图床，脚本里的 BUILTIN_HOSTS 也得有一份
+// （否则拉不到订阅的离线场景下，那条 host 步骤就静默失效）。
+try {
+  const src = readFileSync(resolve(here, '..', 'eagle-fullsize.user.js'), 'utf8');
+  for (const id of hostIds) {
+    if (!src.includes(`id: '${id}'`)) {
+      problems.push(
+        `图床 ${id} 只在 rules/default.json 里，eagle-fullsize.user.js 的 BUILTIN_HOSTS 里没有 —— ` +
+          '拉不到订阅时它会静默失效。两处都要加。'
+      );
+    }
+  }
+  if (!/const BUILTIN_HOSTS = \[/.test(src)) problems.push('userscript 里找不到 BUILTIN_HOSTS');
+} catch (e) {
+  problems.push(`读不到 eagle-fullsize.user.js（校验 BUILTIN_HOSTS）：${e.message}`);
 }
 
 // ---- 版本漂移守门人 ----
