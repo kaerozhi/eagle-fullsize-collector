@@ -131,6 +131,7 @@ Eagle 的 Chrome 扩展「批量收藏」读的是页面上 `<img>` 当前的 `s
 |---|---|---|
 | eporner | `10574489-gao-qiaoshou-zi-san-nude.jpg` | `10574489-gao-qiaoshou-zi-san-nude` |
 | pornpics | `25875390_002_f6a3.jpg` | `25875390_002_f6a3` |
+| kitty-kats | `751781495_ra_petalsvol54_domini_high_0001.jpg` | `751781495_ra_petalsvol54_domini_high_0001` |
 | Pinterest | `abcdef0123456789.jpg` | `Shoko Takahashi, Yua Mikami - Meganekko … - Eporner-03` |
 
 eporner 那条直接带上了站点的拼音 slug，正是「附带关键信息、方便搜索」想要的。
@@ -317,7 +318,7 @@ CI（`.github/workflows/ci.yml`）会在每次 push / PR 上重跑这四步。**
 
 ```bash
 node tests/validate-rules.mjs    # 规则表结构校验
-node tests/resolve-harness.mjs   # 解析器回归：假 DOM，84 项断言
+node tests/resolve-harness.mjs   # 解析器回归：假 DOM，105 项断言
 node tests/scroll-harness.mjs    # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
 node tests/live-eporner.mjs      # 真实站点端到端：需要能访问 eporner
 node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
@@ -350,6 +351,9 @@ node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑�
 | 14 | **pornpics**：`rewrite` 的结果**逐条等于锚点自身的 `href`**（线上 20/20），且结果里不再有 460 段；3 条互不相同 |
 | 15 | **pornpics 负例**：给同一条目加一条 `attr: img@src`，它会返回 1×1 占位图并骗过 `got !== thumb` 守卫 —— 这就是「pornpics 规则里不能写 attr」的实证 |
 | 16 | **pornpics 负例**：两个画廊各自的 `002`，`itemKey` 必须落在 `link:` 上，不能塌缩成 `id:002`（这就是「不能写 idAttr」的实证） |
+| 17 | **kitty-kats**：`a[href*='pixhost'], img.bbImage` 只收帖子图、排除头像；`thumb` 是 `t2` 的 thumbs 图；`link` 是 pixhost 的 show 页（去重靠它）；3 条 `itemKey` 互不相同 |
+| 18 | **kitty-kats**：`rewrite` 逐条得到 show 页里的 `img2` 地址、不再带 `/thumbs/`、3 条互不相同；且 **`t9 → img9`、`t3.pixhost.to → img3.pixhost.to`**（证明主机号与 tld 都是捕获组，不是写死的 `img2`）；非 pixhost 的缩略图不会被误改 |
+| 19 | **kitty-kats 结构性负例**：规则里**只有 `rewrite`**，没有 `probe`、没有 `attr` —— 因为 pixhost 主机号写错时返回的是**能正常 onload 的占位图**，`probe` 在此站必然误判成功 |
 
 `live-eporner.mjs` 用**脚本自己的 `buildEndpointIndex`** 处理真实响应，2026-09-29 实测：
 
@@ -405,6 +409,55 @@ XHR /xhr/gallery-slide/5IUmqWloQOl → HTTP 200｜143990 字节｜511 ms
 > 顺带一提：该页 `meta description` 写「Watch **20 pics**」，页面也确实只有 20 个条目、
 > 没有分页。页面上另有一处「54 pics」是**赞助外链**的文案，与画廊无关 —— 别拿页面上的
 > 数字当抓取目标数。
+
+### kitty-kats（2026-09-30 取证）
+
+这个站是 XenForo 论坛，自己不存图 —— 帖子里嵌的是 **pixhost** 图床的缩略图，所以要两跳：
+
+```html
+<a href='https://pixhost.cc/show/9569/751781495_ra_petalsvol54_domini_high_0001.jpg'>
+  <img class='bbImage'
+       src='https://t2.pixhost.cc/thumbs/9569/751781495_ra_petalsvol54_domini_high_0001.jpg'
+       data-url='…同一个缩略图地址'>
+</a>
+```
+
+外层 `a` 指向 pixhost 的 **show 页**（不是图片直链）。show 页里的 `<img id='image'>` 给出真身：
+
+```
+https://img2.pixhost.cc/images/9569/751781495_ra_petalsvol54_domini_high_0001.jpg  → 2811×4000
+https://t2.pixhost.cc/thumbs/9569/751781495_ra_petalsvol54_domini_high_0001.jpg    → 210×300
+```
+
+规律是 `t<N>.pixhost.<tld>/thumbs/` ⇄ `img<N>.pixhost.<tld>/images/`，路径其余部分逐字节相同，
+**主机号必须原样保留**（3 张图逐一对照 show 页，3/3 都是 `t2 → img2`）。
+
+#### ★ 这条规则真正的坑：主机号写错返回的不是 404，是一张占位图
+
+| 请求 | 结果 |
+|---|---|
+| `img2.…/images/…` | 200 · `image/jpeg` · 999434 字节 · **2811×4000**（真身） |
+| `t2.…/thumbs/…` | 200 · `image/jpeg` · 7942 字节 · 210×300（真缩略图） |
+| `img1` / `img3` / `img4` / `t1` / `t3` | 200 · **`image/png`** · 16138 字节 · **257×126** — 全都是**同一张**占位图（sha 去重后只剩一个） |
+
+也就是说：**请求 `.jpg` 却回 `image/png` 就是占位图**；在这个站，200 和 `image/*` 都不可信。
+
+后果很严重：`probe` 策略靠 `Image()` 的 `onload` 判成功，而**占位图能正常 onload** ——
+于是 `probe` 在这个站**必然误判成功**，把整页推成一堆一模一样的占位图，而日志还报「N/N 张拿到原图」。
+这和 eporner 那次 `catimg/3_small.jpg` 事故**同型**，但更隐蔽：那次 URL 全部相同，这次 URL 各不相同，
+只有字节相同 —— 光看 URL 列表根本发现不了。
+
+所以 kitty-kats 规则**只有 `rewrite` 一条策略**，`probe` 和 `attr` 一个都没有，由 #19 用结构性断言钉死。
+
+> **主机号写错时脚本不纠错。** `t1 → img1`，而那本身就是占位图。规则只负责按规律改写，
+> 不负责猜「用户其实想要 img2」—— 猜不了，因为两者都返回 200。
+
+`match` 只写 `*://*.kitty-kats.net/*`（论坛域名），**不去匹配 pixhost** —— 否则任何贴了 pixhost 图的
+网站都会套上这条规则。
+
+> 取证方式：**kitty-kats 在 Cloudflare 后面**，本机（`Invoke-WebRequest` 与两个网页桥 `read_page` /
+> `web_fetch`）访问一律 HTTP 403「Sorry, you have been blocked」，整机共用一个出口，没有替代通道 ——
+> 所以条目 DOM 是请用户从浏览器 DevTools 里导出的；pixhost 本身没有反爬，那一半是自己实测的。
 
 ### `scroll-harness.mjs`：虚拟化列表（Pinterest 那一类）
 

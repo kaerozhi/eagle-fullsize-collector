@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.3.0
+// @version      0.4.0
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.3.0';
+  const VERSION = '0.4.0';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -223,6 +223,50 @@
         // ★ 也故意不写 idAttr：data-tid 是 002/005 这种，只在单个画廊内唯一，而
         //   itemKey 让 externalId 优先 —— 一旦页面含多个画廊就会互相塌缩成一条。
         //   去掉 idAttr 后，去重落到 link:（＝锚点 href 的 /1280/ 地址），全局唯一。
+      ],
+    },
+    {
+      id: 'kitty-kats',
+      name: 'Kitty-Kats 论坛（pixhost 图床）',
+      enabled: true,
+      match: ['*://*.kitty-kats.net/*'],
+      referer: 'https://kitty-kats.net/',
+      collect: {
+        // 实测（用户从真实浏览器导出的 DOM）：帖子图长这样 ——
+        //   <a href='https://pixhost.cc/show/9569/<id>_<name>.jpg'>
+        //     <img class='bbImage' src='https://t2.pixhost.cc/thumbs/9569/<id>_<name>.jpg'
+        //          data-url='…同一个缩略图地址'>
+        //   </a>
+        // 外层 a 指向 pixhost 的 show 页（不是图片直链），所以要两跳。
+        // 两个选择器命中的是同一批图：前者精确拿到外层 a（link 可靠），后者兜住没有
+        // 外层 a 的帖子图；itemKey 会按外层 a 的 href 去重，不会重复收集。
+        item: "a[href*='pixhost'], img.bbImage",
+        img: 'img',
+        link: 'self',
+        scrollToLoad: true,
+      },
+      // 实测结论（2026-09-30，对 pixhost 的联网实测）：
+      //   show 页里的 <img id='image'> 给出真身：
+      //     https://img2.pixhost.cc/images/9569/<id>_<name>.jpg  → 2811x4000
+      //   而缩略图 t2.pixhost.cc/thumbs/… 是 210x300。
+      //   规律：t<N>.pixhost.<tld>/thumbs/  ⇄  img<N>.pixhost.<tld>/images/，
+      //   路径其余部分逐字节相同，**主机号必须原样保留**
+      //   （3 张图逐一对照 show 页确认，3/3 都是 t2 → img2）。
+      // ★★ 最容易致命的坑：主机号写错**不会 404**，而是返回一张占位图。
+      //   img1 / img3 / img4 与 t1 / t3 全部 HTTP 200 + image/png，且都是同一个
+      //   16138 字节、257x126 的 PNG（多个地址 sha 去重后只剩 1 个）。
+      //   而 probe 策略靠 Image() 的 onload 判成功 —— 占位图能正常 onload，
+      //   于是 probe 在此站**必然误判成功**，把整页推成一堆一模一样的占位图，
+      //   而日志还报「N/N 张拿到原图」。这与 eporner 那次 catimg/3_small.jpg 事故
+      //   同型，而且更隐蔽（URL 各不相同，只有字节相同）。
+      //   → 所以本规则只用 rewrite，绝不写 probe。
+      // ★ 也故意不写 attr：img 的 src 与 data-url 都是缩略图地址，读出来还是缩略图。
+      resolve: [
+        {
+          type: 'rewrite',
+          // .cc / .to / .org 都接受：实测 pixhost.cc 与 pixhost.to 返回同一张 show 页。
+          rules: [{ re: '//t(\\d+)\\.pixhost\\.(cc|to|org)/thumbs/', to: '//img$1.pixhost.$2/images/' }],
+        },
       ],
     },
   ];

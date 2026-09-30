@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "updated": "2026-09-29",
+  "version": 2,
+  "updated": "2026-09-30",
   "note": "Eagle 大图批量收藏 —— 订阅规则表。维护方式同 AdBlock 列表：一个站点一条规则，删/改/加都只动本文件。resolve 是一个有序管线，逐级降级，第一个产出原图 URL 的环节胜出。",
   "_schema": {
     "id": "唯一标识，本地覆盖会按 id 合并",
@@ -123,6 +123,31 @@
             {
               "re": "//cdni\\.pornpics\\.com/\\d+/",
               "to": "//cdni.pornpics.com/1280/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "kitty-kats",
+      "name": "Kitty-Kats 论坛（pixhost 图床）",
+      "enabled": true,
+      "match": ["*://*.kitty-kats.net/*"],
+      "referer": "https://kitty-kats.net/",
+      "collect": {
+        "item": "a[href*='pixhost'], img.bbImage",
+        "img": "img",
+        "link": "self",
+        "scrollToLoad": true
+      },
+      "_实测结论": "2026-09-30 用用户从真实浏览器导出的 DOM + 对 pixhost 的联网实测定型。①论坛帖子里嵌的不是大图，而是 pixhost 图床的缩略图：<a href='https://pixhost.cc/show/9569/<id>_<name>.jpg'><img class='bbImage' src='https://t2.pixhost.cc/thumbs/9569/<id>_<name>.jpg' data-url='…同一个缩略图地址'></a> —— 外层 a 指向 pixhost 的 show 页，不是图片直链。②show 页里的 <img id='image'> 给出真身 https://img2.pixhost.cc/images/9569/<id>_<name>.jpg，实测 2811×4000（缩略图 210×300）。③所以规律是 t<N>.pixhost.<tld>/thumbs/ → img<N>.pixhost.<tld>/images/，**主机号必须原样保留**（t2 对应 img2，3 张图逐一对照 show 页确认 3/3）。④【最关键，务必看】主机号写错不会 404：img1/img3/img4 与 t1/t3 全部返回 HTTP 200 + image/png，而且都是同一个 16138 字节、257×126 的占位图（多个地址 sha 去重后只剩 1 个）。这意味着 probe 策略在这里必然误判成功 —— 占位图能正常 onload，于是整页被推成一堆一模一样的占位图，而日志还报『N/N 张拿到原图』。这与 eporner 那次 catimg/3_small.jpg 事故是同型故障，所以本规则**只用 rewrite，绝不写 probe、绝不写 attr**。⑤不能写 attr 的第二个理由：img 的 src 与 data-url 都是缩略图地址，读出来仍是缩略图。⑥.tld 同时接受 cc/to/org：pixhost.cc 与 pixhost.to 返回同一张 show 页，多写一个只是保险。⑦collect.item 写成 a[href*='pixhost'], img.bbImage 两个选择器：前者精确命中被 pixhost 链接包住的图块（link 可靠），后者兜住没有外层 a 的帖子图。两者命中的是同一批图，itemKey 会按外层 a 的 href 去重，不会重复收集。",
+      "resolve": [
+        {
+          "type": "rewrite",
+          "rules": [
+            {
+              "re": "//t(\\d+)\\.pixhost\\.(cc|to|org)/thumbs/",
+              "to": "//img$1.pixhost.$2/images/"
             }
           ]
         }

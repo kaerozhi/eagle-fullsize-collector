@@ -11,7 +11,7 @@
  * 用法：node eagle-batch-collector/tests/resolve-harness.mjs
  * 沙箱与假 DOM 来自 ./_load-script.mjs
  */
-import { El, fakeDocument, loadEbc, epornerRule, pornpicsRule } from './_load-script.mjs';
+import { El, fakeDocument, loadEbc, epornerRule, pornpicsRule, kittyKatsRule } from './_load-script.mjs';
 
 const GALLERY_DIR = 'https://static-ca-cdn.eporner.com/gallery/Ol/oQ/5IUmqWloQOl/';
 const CATIMG = 'https://static-ca-cdn.eporner.com/catimg/3_small.jpg';
@@ -477,6 +477,138 @@ console.log('\n== 9. 按 URL 去重（106 个条目 → 85 张照片 的那个�
     ok('两个画登记 2 条', items.length === 2, String(items.length));
     ok('两条的 itemKey 不相同（去重落在锚点 href 上）', new Set(keys).size === 2, JSON.stringify(keys));
     ok('itemKey 用的是 link: 前缀而不是 id:', keys.every((k) => k.startsWith('link:')), JSON.stringify(keys));
+  }
+}
+
+// ============================================================
+// 【kitty-kats】pixhost 图床：thumb → 原图只能靠 rewrite，绝不能碰 probe
+// ============================================================
+// 真实帖子（用户从浏览器导出）里的每一条：
+//   <a href='https://pixhost.cc/show/9569/<id>_<name>.jpg'>
+//     <img class='bbImage' src='https://t2.pixhost.cc/thumbs/9569/<id>_<name>.jpg'
+//          data-url='…同一个缩略图地址'>
+//   </a>
+// show 页里的真身是 https://img2.pixhost.cc/images/9569/<id>_<name>.jpg（2811x4000），
+// 而缩略图是 210x300。
+// ★★ 主机号写错**不会 404**：img1 / img3 / img4 与 t1 / t3 全部返回 200 + image/png，
+//    而且都是同一个 16138 字节、257x126 的占位图（多个地址 sha 去重后只剩一个）。
+//    占位图能正常 onload，所以 probe 若用 Image() 判成功，在此站**必然误判成功**，
+//    把整页推成一堆一模一样的占位图，日志还报「N/N 张拿到原图」。
+//    → 本规则只有 rewrite 一条策略，下面 19 用结构性断言把这条钉死。
+{
+  const KK = kittyKatsRule(EBC);
+  const SHOW = (id, name) => `https://pixhost.cc/show/9569/${id}_${name}.jpg`;
+  const THUMB2 = (id, name) => `https://t2.pixhost.cc/thumbs/9569/${id}_${name}.jpg`;
+  const FULL2 = (id, name) => `https://img2.pixhost.cc/images/9569/${id}_${name}.jpg`;
+  const SAMPLES = [
+    ['751781467', '_ra-petalsvol54-cover'],
+    ['751781468', '_ra-petalsvol54-cover-clean'],
+    ['751781495', '_ra_petalsvol54_domini_high_0001'],
+  ];
+
+  const makeKK = () => {
+    const body = new El('body');
+    // 头像也有「外层 a + img」，必须被排除
+    const av = new El('a', { href: '/members/xericx.10184915/' });
+    av.appendChild(
+      new El('img', { src: '/data/avatars/m/10184/10184915.jpg?1671694632', class: 'avatar-u10184915-m' })
+    );
+    body.appendChild(av);
+    const anchors = [];
+    for (const [id, name] of SAMPLES) {
+      const a = new El('a', { href: SHOW(id, name) });
+      a.appendChild(
+        new El('img', { class: 'bbImage', src: THUMB2(id, name), 'data-url': THUMB2(id, name), alt: '' })
+      );
+      body.appendChild(a);
+      anchors.push(a);
+    }
+    return { body, anchors };
+  };
+
+  const kkItem = (page, i) => ({
+    el: page.anchors[i],
+    img: page.anchors[i].children[0],
+    thumb: page.anchors[i].children[0].getAttribute('src') || '',
+    link: page.anchors[i].href,
+    externalId: '',
+  });
+
+  // 只关心 thumb 的最小条目（给「主机号不写死」那几条用）
+  const bare = (thumb) => ({ el: null, img: new El('img', {}), thumb, link: '', externalId: '' });
+
+  console.log('\n== 17. kitty-kats：只收帖子图，不收头像 ==');
+  {
+    const page = makeKK();
+    usePage(page);
+    const items = EBC.collectItems(KK);
+    ok('头像被排除，正好 3 条', items.length === 3, String(items.length));
+    ok(
+      'thumb 取的是 t2 的 thumbs 图（页面没有 data-src 系列，落在 src 上）',
+      items.length === 3 && items.every((it, i) => it.thumb === THUMB2(...SAMPLES[i])),
+      JSON.stringify(items.map((it) => it.thumb))
+    );
+    ok(
+      'link 是 pixhost 的 show 页（不是图片直链，用来去重）',
+      items.length === 3 && items.every((it, i) => it.link === SHOW(...SAMPLES[i])),
+      JSON.stringify(items.map((it) => it.link))
+    );
+    ok('3 条 itemKey 互不相同', new Set(items.map((it) => EBC.itemKey(it))).size === 3);
+  }
+
+  console.log('\n== 18. kitty-kats：rewrite 把 thumbs 换成 images，主机号跟着走 ==');
+  {
+    const page = makeKK();
+    usePage(page);
+    const all = [];
+    for (let i = 0; i < SAMPLES.length; i++) {
+      const r = await EBC.resolveItem(kkItem(page, i), KK, freshState());
+      ok(`第 ${i + 1} 条来源是 rewrite`, r && r.via === 'rewrite', JSON.stringify(r && r.via));
+      ok(`第 ${i + 1} 条 === show 页里的 img2 地址`, r && r.url === FULL2(...SAMPLES[i]), r && r.url);
+      ok(`第 ${i + 1} 条不再带 thumbs 段`, r && !/\/thumbs\//.test(r.url), r && r.url);
+      if (r) all.push(r.url);
+    }
+    ok('3 条互不相同（不会塌缩成同一张）', new Set(all).size === 3, JSON.stringify(all));
+
+    const r9 = await EBC.resolveItem(bare('https://t9.pixhost.cc/thumbs/9569/x_1.jpg'), KK, freshState());
+    ok(
+      't9 → img9：主机号是捕获组，不是写死的 img2',
+      r9 && r9.url === 'https://img9.pixhost.cc/images/9569/x_1.jpg',
+      r9 && r9.url
+    );
+
+    const rto = await EBC.resolveItem(bare('https://t3.pixhost.to/thumbs/9569/y_2.jpg'), KK, freshState());
+    ok(
+      'pixhost.to 域名整体保留（tld 也是捕获组）',
+      rto && rto.url === 'https://img3.pixhost.to/images/9569/y_2.jpg',
+      rto && rto.url
+    );
+
+    const rnon = await EBC.resolveItem(bare('https://example.com/thumbs/9569/z.jpg'), KK, freshState());
+    ok('非 pixhost 的缩略图不会被误改', rnon && !/pixhost/.test(rnon.url || ''), rnon && rnon.url);
+  }
+
+  console.log('\n== 19. kitty-kats：占位图陷阱 —— 规则里绝不能出现 probe / attr ==');
+  {
+    const types = KK.resolve.map((s) => s.type);
+    ok('rewrite 是唯一策略', types.length === 1 && types[0] === 'rewrite', JSON.stringify(types));
+    ok(
+      '没有 probe 步骤（占位图能正常 onload，probe 在此站必然误判成功）',
+      !KK.resolve.some((s) => s.type === 'probe')
+    );
+    ok(
+      '没有 attr 步骤（img 的 src / data-url 都是缩略图，读出来还是缩略图）',
+      !KK.resolve.some((s) => s.type === 'attr')
+    );
+    // 说明：probeImage 只看 Image 的 onload，而「占位图 onload 成功」这件事需要一张
+    // 真实网络响应才能复现；沙箱里的 Image 是空壳（既不 onload 也不 onerror），
+    // 所以这里用结构性断言钉死不变量，而不是假装跑了一遍网络。
+    const r1 = await EBC.resolveItem(bare('https://t1.pixhost.cc/thumbs/9569/z.jpg'), KK, freshState());
+    ok(
+      '主机号写错时不纠错（t1 → img1，那本身就是占位图；规则只负责按规律改写）',
+      r1 && r1.url === 'https://img1.pixhost.cc/images/9569/z.jpg',
+      r1 && r1.url
+    );
   }
 }
 

@@ -266,3 +266,10 @@ export function pornpicsRule(EBC) {
   if (!r) throw new Error('内置规则里找不到 pornpics');
   return r;
 }
+
+/** 找到内置的 kitty-kats 规则 */
+export function kittyKatsRule(EBC) {
+  const r = EBC.BUILTIN_RULES.find((x) => x.id === 'kitty-kats');
+  if (!r) throw new Error('内置规则里找不到 kitty-kats');
+  return r;
+}
