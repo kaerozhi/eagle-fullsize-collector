@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.5.0
+// @version      0.6.0
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.5.0';
+  const VERSION = '0.6.0';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -145,6 +145,27 @@
             { re: '//i\\.pinimg\\.com/(?:\\d+x\\d*|originals|\\d+x)/', to: '//i.pinimg.com/736x/' },
           ],
         },
+      ],
+    },
+    {
+      id: 'meitulu',
+      name: '美图录分页相册',
+      enabled: true,
+      match: ['*://*.meitulu.me/item/*.html'],
+      collect: {
+        // 美图录的相册正文是 .container-inner-fix-m 下的原图；推荐相册也有 img，
+        // 所以不能退化到全页 img，否则会把推荐封面一并收进来。
+        item: '.container-inner-fix-m > img',
+        img: 'self',
+        pagination: {
+          // 分页器带省略号时，从已发现的链接递归继续发现后续页，直到没有新页。
+          links: 'ul.pagination a[href]',
+          maxPages: 100,
+        },
+      },
+      resolve: [
+        // 这里的 src 本身就是 1200x1800 原图；允许 attr 返回与 thumb 相同的地址。
+        { type: 'attr', selectors: ['img@src'], allowSameThumb: true },
       ],
     },
     {
@@ -630,7 +651,7 @@
    * 返回 [{ el, img, thumb, link, externalId, alt }]
    * thumb = 缩略图当前地址（原图的改写起点）；externalId = 从 DOM 属性读到的条目 id
    */
-  function collectItems(rule) {
+  function collectItems(rule, root = document, baseUrl = location.href) {
     const c = rule.collect || {};
     const imgSel = c.img || 'img';
     const out = [];
@@ -639,6 +660,10 @@
     // 懒加载占位符（1x1 透明 gif 的 data: URI）绝不能当缩略图地址用 ——
     // eporner 整页都是这种占位符，拿它去改写/挖掘全是空转。
     const usable = (u) => !!u && /^https?:/i.test(u);
+    const absolute = (u) => {
+      if (!u || /^(data|blob):/i.test(String(u))) return '';
+      try { return new URL(String(u), baseUrl).href; } catch (e) { return ''; }
+    };
 
     function pickThumb(img) {
       const cands = [
@@ -648,7 +673,10 @@
         img.currentSrc,
         img.src,
       ];
-      for (const v of cands) if (usable(v)) return v;
+      for (const v of cands) {
+        const u = absolute(v);
+        if (usable(u)) return u;
+      }
       return '';
     }
 
@@ -670,23 +698,32 @@
       return (img.getAttribute('alt') || img.getAttribute('title') || '').trim();
     }
 
+    function linkValue(a) {
+      if (!a) return '';
+      const raw = a.getAttribute('href') || a.href || '';
+      // 保留当前页面的原始 href，兼容既有规则/测试；远程分页文档则必须按
+      // 该分页自己的 URL 归一化，否则 detail 会把相对链接解析到当前页。
+      return baseUrl === location.href ? (a.href || raw) : absolute(raw);
+    }
+
     function pickLink(el, img) {
-      if (c.link === 'self' && el && el.tagName === 'A') return el.href;
+      if (c.link === 'self' && el && el.tagName === 'A') return linkValue(el);
       if (c.link && c.link !== 'self') {
         const a = el ? el.querySelector(c.link) : null;
-        if (a) return a.href;
+        if (a) return linkValue(a);
       }
       // 兜底：条目内或 img 的祖先里找 a[href]
       let n = el || img;
-      while (n && n !== document.body) {
-        if (n.tagName === 'A' && n.href) return n.href;
+      const body = root.body || null;
+      while (n && n !== body) {
+        if (n.tagName === 'A' && (n.href || n.getAttribute('href'))) return linkValue(n);
         n = n.parentElement;
       }
       return '';
     }
 
     if (c.item) {
-      for (const el of document.querySelectorAll(c.item)) {
+      for (const el of root.querySelectorAll(c.item)) {
         const img = el.tagName === 'IMG' ? el : el.querySelector(imgSel) || (el.matches('img') ? el : null);
         if (!img) continue;
         const thumb = pickThumb(img);
@@ -696,13 +733,13 @@
         const key = thumb || externalId || link;
         if (!key || seen.has(key)) continue;
         seen.add(key);
-        out.push({ el, img, thumb, link, externalId, alt: pickAlt(img) });
+        out.push({ el, img, thumb, link, externalId, alt: pickAlt(img), pageUrl: baseUrl, baseUrl });
       }
       if (out.length) return out;
       // item 选择器没命中就别死心，退化到全页 img
     }
 
-    for (const img of document.querySelectorAll(imgSel)) {
+    for (const img of root.querySelectorAll(imgSel)) {
       const thumb = pickThumb(img);
       if (!thumb || seen.has(thumb)) continue;
       // 过滤明显不是内容的图（图标）
@@ -710,7 +747,16 @@
       const h = img.naturalHeight || img.height || parseInt(img.getAttribute('height') || '0', 10) || 0;
       if ((w && w < 60) || (h && h < 60)) continue;
       seen.add(thumb);
-      out.push({ el: img, img, thumb, link: pickLink(img, img), externalId: '', alt: pickAlt(img) });
+      out.push({
+        el: img,
+        img,
+        thumb,
+        link: pickLink(img, img),
+        externalId: '',
+        alt: pickAlt(img),
+        pageUrl: baseUrl,
+        baseUrl,
+      });
     }
     return out;
   }
@@ -775,6 +821,8 @@
       prev.img = it.img;
       if (!prev.link && it.link) prev.link = it.link;
       if (!prev.externalId && it.externalId) prev.externalId = it.externalId;
+      if (!prev.pageUrl && it.pageUrl) prev.pageUrl = it.pageUrl;
+      if (!prev.baseUrl && it.baseUrl) prev.baseUrl = it.baseUrl;
       if (!usableUrl(prev.thumb) && usableUrl(it.thumb)) prev.thumb = it.thumb;
     }
     return added;
@@ -802,19 +850,107 @@
     }
   }
 
+  function canonicalPageUrl(url, baseUrl = location.href) {
+    try {
+      const u = new URL(url, baseUrl);
+      u.hash = '';
+      return u.href;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function paginationLinks(rule, root = document, baseUrl = location.href) {
+    const p = (rule.collect || {}).pagination;
+    if (!p) return [];
+    const selector = p.links || p.selector || 'a[href]';
+    const out = [];
+    const seen = new Set();
+    try {
+      for (const node of root.querySelectorAll(selector)) {
+        const raw = node.getAttribute('href') || node.href || '';
+        const url = canonicalPageUrl(raw, baseUrl);
+        if (!url || !/^https?:/i.test(url) || seen.has(url)) continue;
+        seen.add(url);
+        out.push(url);
+      }
+    } catch (e) {
+      /* invalid/missing pagination selector: leave the page as single-page */
+    }
+    return out;
+  }
+
+  async function fetchPaginationDocument(url, rule) {
+    const r = await gmGet(url, {
+      timeout: 30000,
+      headers: rule.referer ? { Referer: rule.referer } : {},
+    });
+    if (r.status < 200 || r.status >= 400) throw new Error('HTTP ' + r.status);
+    if (typeof DOMParser === 'undefined') throw new Error('浏览器不支持 DOMParser');
+    return new DOMParser().parseFromString(r.responseText || '', 'text/html');
+  }
+
+  /**
+   * 递归发现并抓取分页。只依赖页面上声明的分页链接，不猜 URL 模板；
+   * 这样既能处理 3006.html → 3006_2.html，也能处理带省略号的分页器。
+   * 每个远程页面在条目上保留自己的 baseUrl，relative src/link 才不会被当前页误解析。
+   */
+  async function collectPagination(rule, map, onPage) {
+    const p = (rule.collect || {}).pagination;
+    if (!p) return { pagesFetched: 0, paginationCapped: false, paginationAborted: false };
+    const cap = parseInt(settings.maxItems, 10) || 0;
+    const maxPages = Math.max(1, parseInt(p.maxPages, 10) || 100);
+    const queue = paginationLinks(rule, document, location.href);
+    const seen = new Set([canonicalPageUrl(location.href)]);
+    let pagesFetched = 0;
+    let paginationCapped = false;
+    let paginationAborted = false;
+
+    while (queue.length && pagesFetched < maxPages) {
+      if (scanAbort) { paginationAborted = true; break; }
+      if (cap > 0 && map.size >= cap) { paginationCapped = true; break; }
+      const url = queue.shift();
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      try {
+        const doc = await fetchPaginationDocument(url, rule);
+        const added = mergeItems(map, collectItems(rule, doc, url));
+        pagesFetched++;
+        if (onPage) onPage(pagesFetched, url, map.size, added);
+        if (cap > 0 && map.size >= cap) { paginationCapped = true; break; }
+        for (const next of paginationLinks(rule, doc, url)) {
+          if (!seen.has(next)) queue.push(next);
+        }
+      } catch (e) {
+        pagesFetched++;
+        log(`分页 ${url} 抓取失败：${e && e.message ? e.message : e}`, 'warn');
+      }
+    }
+    if (queue.length && pagesFetched >= maxPages) paginationCapped = true;
+    return { pagesFetched, paginationCapped, paginationAborted };
+  }
+
   /**
    * 收集条目。声明了 scrollToLoad 的站点会**边走边收**，把整个无限列表
    * 累计下来；没声明的站点保持原来的单次快照（一页到底的详情页之类）。
    * @returns {{items:Array, rounds:number, capped:boolean, timedOut:boolean, scrolled:boolean}}
    */
-  async function collectAll(rule, onRound) {
+  async function collectAll(rule, onRound, onPage) {
     const map = new Map();
     mergeItems(map, collectItems(rule));
     const c = rule.collect || {};
+    const pagination = await collectPagination(rule, map, onPage);
     // 自动滚动是**显式选择**。默认的 'follow' 模式下脚本绝不抢滚动条 ——
     // 这里只取当前挂在 DOM 里的那一批，剩下的交给 follow 采集器跟着用户滚。
     if (!c.scrollToLoad || settings.scanMode !== 'auto') {
-      return { items: [...map.values()], rounds: 0, capped: false, timedOut: false, scrolled: false };
+      return {
+        items: [...map.values()],
+        rounds: 0,
+        capped: false,
+        timedOut: false,
+        scrolled: false,
+        ...pagination,
+      };
     }
 
     const cap = parseInt(settings.maxItems, 10) || 0;
@@ -846,7 +982,15 @@
     // 把用户放回他原来的位置。收集结果已经在 map 里了，跟滚回去无关。
     try { window.scrollTo(0, startY); } catch (e) {}
     if (rounds) await sleep(150);
-    return { items: [...map.values()], rounds, capped, timedOut, aborted, scrolled: rounds > 0 };
+    return {
+      items: [...map.values()],
+      rounds,
+      capped: capped || pagination.paginationCapped,
+      timedOut,
+      aborted,
+      scrolled: rounds > 0,
+      ...pagination,
+    };
   }
 
   /* ============================================================
@@ -1241,7 +1385,7 @@
   }
 
   // 从单个节点上按 spec 读值（spec = "selector@attr"）
-  function readAttrOfNode(n, spec) {
+  function readAttrOfNode(n, spec, baseUrl = location.href) {
     const at = spec.lastIndexOf('@');
     if (at < 0) return '';
     const attr = spec.slice(at + 1).trim();
@@ -1249,7 +1393,7 @@
       if (attr === 'srcset:last' || attr === 'srcset:first') {
         const v = n.getAttribute('srcset') || n.getAttribute('data-srcset') || '';
         const u = pickFromSrcset(v, attr === 'srcset:first' ? 'first' : 'last');
-        return u ? new URL(u, location.href).href : '';
+        return u ? new URL(u, baseUrl).href : '';
       }
       if (attr === 'text') {
         return n.textContent && n.textContent.trim() ? n.textContent.trim() : '';
@@ -1260,13 +1404,13 @@
       // 懒加载占位符（data:image/gif;base64,R0lGODlh…）和 blob: 一律不算地址，
       // 否则它们会被当成"原图"推给 Eagle，收进来一堆 1x1 透明图。
       if (/^(data|blob):/i.test(s)) return '';
-      return new URL(s, location.href).href;
+      return new URL(s, baseUrl).href;
     } catch (e) {
       return '';
     }
   }
 
-  function readSelectorAttr(root, spec) {
+  function readSelectorAttr(root, spec, baseUrl = location.href) {
     const at = spec.lastIndexOf('@');
     if (at < 0) return '';
     const sel = spec.slice(0, at).trim();
@@ -1277,7 +1421,7 @@
       return '';
     }
     for (const n of nodes) {
-      const v = readAttrOfNode(n, spec);
+      const v = readAttrOfNode(n, spec, baseUrl);
       if (v) return v;
     }
     return '';
@@ -1381,6 +1525,7 @@
    */
   async function resolveItem(item, rule, state) {
     const thumb = item.thumb;
+    const baseUrl = item.baseUrl || item.pageUrl || location.href;
 
     for (const step of rule.resolve || []) {
       // ---- attr：列表页 DOM 里现成的 ----
@@ -1392,9 +1537,9 @@
             const sel = at < 0 ? spec : spec.slice(0, at);
             // 1) 条目自身的 img（或条目元素）若匹配该选择器，直接读它
             const self = item.img || item.el;
-            if (self && self.matches && sel && self.matches(sel)) got = readAttrOfNode(self, spec);
+            if (self && self.matches && sel && self.matches(sel)) got = readAttrOfNode(self, spec, baseUrl);
             // 2) 否则在条目范围内查
-            if (!got && item.el) got = readSelectorAttr(item.el, spec);
+            if (!got && item.el) got = readSelectorAttr(item.el, spec, baseUrl);
             // 3) 整页兜底 —— ★ 默认禁用，必须由规则显式写 allowDocument: true
             //
             //    ★ 这是踩过的真实事故（用户实测）：eporner 画廊页的条目 img 没有可用的
@@ -1409,13 +1554,15 @@
             //      · 默认关闭，规则要显式声明 allowDocument: true 才启用；
             //      · 即便启用，也要求结果与原缩略图**同目录**，否则一律丢弃。
             if (!got && step.allowDocument === true && thumb) {
-              const g = readSelectorAttr(document, spec);
+              const g = readSelectorAttr(document, spec, baseUrl);
               if (g && pathDir(g) === pathDir(thumb)) got = g;
             }
           } catch (e) {
             got = '';
           }
-          if (got && got !== thumb && /^https?:/i.test(got)) return { url: got, via: 'attr:' + spec, thumb };
+          if (got && (got !== thumb || step.allowSameThumb === true) && /^https?:/i.test(got)) {
+            return { url: got, via: 'attr:' + spec, thumb };
+          }
         }
         continue;
       }
@@ -2463,10 +2610,17 @@
     toggleStopBtn(settings.scanMode === 'auto');
     let col;
     try {
-      col = await collectAll(currentRule, (round, total, added) => {
-        els.st.textContent = `滚动收集 第 ${round} 轮｜累计 ${total} 条…`;
-        if (added) log(`第 ${round} 轮：新增 ${added} 条，累计 ${total} 条。`, 'info');
-      });
+      col = await collectAll(
+        currentRule,
+        (round, total, added) => {
+          els.st.textContent = `滚动收集 第 ${round} 轮｜累计 ${total} 条…`;
+          if (added) log(`第 ${round} 轮：新增 ${added} 条，累计 ${total} 条。`, 'info');
+        },
+        (page, url, total, added) => {
+          els.st.textContent = `分页收集第 ${page} 页｜累计 ${total} 条…`;
+          log(`分页 ${page}：新增 ${added} 条，累计 ${total} 条（${shortUrl(url)}）。`, 'info');
+        }
+      );
     } finally {
       scanRunning = false;
       toggleStopBtn(false);
@@ -2477,6 +2631,12 @@
     mergeItems(accum.map, col.items);
     const items = [...accum.map.values()];
 
+    if (col.pagesFetched) {
+      log(`分页收集结束：读取了 ${col.pagesFetched} 个分页，本次得到 ${col.items.length} 条。`, 'info');
+    }
+    if (col.paginationAborted) {
+      log('分页收集已停止（你按了「停止滚动」）。已收集的分页条目会保留。', 'warn');
+    }
     if (col.scrolled) log(`滚动收集结束：滚了 ${col.rounds} 轮。`, 'info');
     if (col.capped) {
       log(

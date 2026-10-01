@@ -191,7 +191,7 @@ export function loadEbc({ gmGet, document: doc, location: loc } = {}) {
   if (ci < 0) throw new Error('找不到 IIFE 结尾');
   src =
     src.slice(0, ci) +
-    '\n  globalThis.__EBC__ = { eagle, resolveItem, readSelectorAttr, buildEndpointIndex, collectItems, pathDir, dedupeByUrl, BUILTIN_RULES, collectAll, mergeItems, itemKey, usableUrl, SCROLL, findRuleFor, applyReplacements, followPass, settings, subscriptionUrlOf, DEFAULT_SETTINGS, buildItemName, baseNameOfUrl, isWeakBase, sanitizeName,' +
+    '\n  globalThis.__EBC__ = { eagle, resolveItem, readSelectorAttr, buildEndpointIndex, collectItems, paginationLinks, collectPagination, pathDir, dedupeByUrl, BUILTIN_RULES, collectAll, mergeItems, itemKey, usableUrl, SCROLL, findRuleFor, applyReplacements, followPass, settings, subscriptionUrlOf, DEFAULT_SETTINGS, buildItemName, baseNameOfUrl, isWeakBase, sanitizeName,' +
     '\n    BUILTIN_HOSTS, findHost, activeHosts, hostNames, genericGalleryRule, detectHostGallery, HOST_GALLERY_DETAIL_SELECTORS, ruleset, applyRemoteHosts,' +
     '\n    __set: (o) => { if ("resolvedCache" in o) resolvedCache = o.resolvedCache; if ("currentRule" in o) currentRule = o.currentRule; if ("accum" in o) accum = o.accum; if ("scanAbort" in o) scanAbort = o.scanAbort; },' +
     '\n    __get: () => ({ resolvedCache, accum, resolvedByKey, sentUrls, followFilled }) };\n' +

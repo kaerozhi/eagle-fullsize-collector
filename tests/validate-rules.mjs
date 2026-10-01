@@ -95,6 +95,18 @@ for (const [i, r] of (Array.isArray(data.rules) ? data.rules : []).entries()) {
     if (c.scrollToLoad !== undefined && typeof c.scrollToLoad !== 'boolean') {
       problems.push(`${at}.collect.scrollToLoad: 只能是 true/false`);
     }
+    if (c.pagination !== undefined) {
+      if (!c.pagination || typeof c.pagination !== 'object' || Array.isArray(c.pagination)) {
+        problems.push(`${at}.collect.pagination: 必须是对象`);
+      } else {
+        const links = c.pagination.links || c.pagination.selector;
+        if (!isStr(links)) problems.push(`${at}.collect.pagination: 缺少 links 或 selector 选择器`);
+        if (c.pagination.maxPages !== undefined &&
+            (!Number.isInteger(c.pagination.maxPages) || c.pagination.maxPages < 1)) {
+          problems.push(`${at}.collect.pagination.maxPages: 必须是大于 0 的整数`);
+        }
+      }
+    }
   }
 
   // --- resolve 管线 ---
@@ -165,6 +177,9 @@ for (const [i, r] of (Array.isArray(data.rules) ? data.rules : []).entries()) {
             problems.push(`${rat}: 正则写错了 —— ${e.message}`);
           }
         }
+      }
+      if (s.type === 'attr' && s.allowSameThumb !== undefined && typeof s.allowSameThumb !== 'boolean') {
+        problems.push(`${sat} (attr).allowSameThumb: 只能是 true/false`);
       }
       if (s.type === 'attr' && Array.isArray(s.selectors)) {
         for (const [k, sel] of s.selectors.entries()) {

@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updated": "2026-10-05",
+  "updated": "2026-10-01",
   "note": "Eagle 大图批量收藏 —— 订阅规则表。维护方式同 AdBlock 列表：一个站点一条规则，删/改/加都只动本文件。resolve 是一个有序管线，逐级降级，第一个产出原图 URL 的环节胜出。",
   "_schema": {
     "id": "唯一标识，本地覆盖会按 id 合并",
@@ -16,7 +16,8 @@
       "img": "条目内部的 img 选择器，默认 img",
       "link": "详情页链接来源：self 表示条目本身就是 <a>；也可写选择器或在条目内找 a[href]",
       "idAttr": "从条目元素上读条目 id 的属性，写法如 self@data-photo-id。缩略图还没懒加载出来（src 是占位符）时，pagedata 靠它仍能工作",
-      "scrollToLoad": "true 时边走边滚、边滚边收：每滚一屏就把当前 DOM 里的条目合并进累计表（按 id/链接去重）。虚拟化列表页必须开 —— Pinterest 这类瀑布流只挂载视口附近的 tile，滚出视野的会被卸载，所以单次快照永远只有首屏那 ~20 张，而『滚到底再滚回来、最后重收一次』同样拿不到。src 是 1x1 占位图的懒加载页面也靠它"
+      "scrollToLoad": "true 时边走边滚、边滚边收：每滚一屏就把当前 DOM 里的条目合并进累计表（按 id/链接去重）。虚拟化列表页必须开 —— Pinterest 这类瀑布流只挂载视口附近的 tile，滚出视野的会被卸载，所以单次快照永远只有首屏那 ~20 张，而『滚到底再滚回来、最后重收一次』同样拿不到。src 是 1x1 占位图的懒加载页面也靠它",
+      "pagination": "可选。跨页相册的分页链接配置，脚本会递归抓取声明的链接并合并各页条目；links/selector 是选择器，maxPages 是安全上限"
     },
     "resolve": [
       { "type": "attr", "selectors": ["img@data-full", "img@srcset:last", "img@src"] },
@@ -25,7 +26,7 @@
       { "type": "detail", "selectors": ["meta[property='og:image']@content", "img#main-image@src"], "excludeThumb": true }
     ],
     "_resolve说明": {
-      "attr": "直接从列表页 DOM 读原图地址（data-* / srcset / JSON）",
+      "attr": "直接从列表页 DOM 读原图地址（data-* / srcset / JSON）；步骤可选 allowSameThumb: true，表示 src 本身就是原图，允许结果与 thumb 相同",
       "rewrite": "对缩略图 URL 做正则改写，纯本地、零请求、最快。规律**写死在站点规则里**，只对这个站生效",
       "host": "【论坛场景的正解】拿缩略图 URL 去顶层 hosts（图床表）里找匹配的记录，按它的 thumbRe/fullTo 改写。同样是纯本地零请求，区别是规律放在**所有站点共享**的图床表里 —— 论坛里用户从各种免费图床贴图，「一个站点一条规则」从根上不成立，只能认图床。加一家图床只往 hosts 里加一条，所有站点规则同时受益",
       "pagedata": "从页面自身的数据里按「同目录 + 同 id」找原图：扒页面源码 + 挂钩 XHR/fetch 抓 viewer 的响应 + 页面上已显示的大图。判据是『同 id 但不带 _WxH 尺寸后缀』。适用于 hash 型页内 viewer，也是 endpoint 失效时的兜底",
@@ -112,6 +113,24 @@
           ]
         }
       ]
+    },
+    {
+      "id": "meitulu",
+      "name": "美图录分页相册",
+      "enabled": true,
+      "match": ["*://*.meitulu.me/item/*.html"],
+      "collect": {
+        "item": ".container-inner-fix-m > img",
+        "img": "self",
+        "pagination": {
+          "links": "ul.pagination a[href]",
+          "maxPages": 100
+        }
+      },
+      "resolve": [
+        { "type": "attr", "selectors": ["img@src"], "allowSameThumb": true }
+      ],
+      "_实测结论": "美图录相册正文使用 /p/<相册id>-<短哈希>.jpg，单页 6 张；分页器使用 3006.html、3006_2.html…形式，并在两端展示部分页码。脚本会从分页器递归发现所有链接，抓取每页正文图片并按 URL 去重，因此打开任意一页后点击一次扫描即可收全相册。"
     },
     {
       "id": "eporner",
