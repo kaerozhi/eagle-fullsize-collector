@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updated": "2026-10-01",
+  "updated": "2026-10-23",
   "note": "Eagle 大图批量收藏 —— 订阅规则表。维护方式同 AdBlock 列表：一个站点一条规则，删/改/加都只动本文件。resolve 是一个有序管线，逐级降级，第一个产出原图 URL 的环节胜出。",
   "_schema": {
     "id": "唯一标识，本地覆盖会按 id 合并",
@@ -17,7 +17,25 @@
       "link": "详情页链接来源：self 表示条目本身就是 <a>；也可写选择器或在条目内找 a[href]",
       "idAttr": "从条目元素上读条目 id 的属性，写法如 self@data-photo-id。缩略图还没懒加载出来（src 是占位符）时，pagedata 靠它仍能工作",
       "scrollToLoad": "true 时边走边滚、边滚边收：每滚一屏就把当前 DOM 里的条目合并进累计表（按 id/链接去重）。虚拟化列表页必须开 —— Pinterest 这类瀑布流只挂载视口附近的 tile，滚出视野的会被卸载，所以单次快照永远只有首屏那 ~20 张，而『滚到底再滚回来、最后重收一次』同样拿不到。src 是 1x1 占位图的懒加载页面也靠它",
-      "pagination": "可选。跨页相册的分页链接配置，脚本会递归抓取声明的链接并合并各页条目；links/selector 是选择器，maxPages 是安全上限"
+      "pagination": "可选。跨页相册的分页链接配置，脚本会递归抓取声明的链接并合并各页条目；links/selector 是选择器，maxPages 是安全上限",
+      "api": "可选。【接口即图库】图集不在 DOM 里的站点用它。声明接口地址/方法/请求体/变量，以及「图片节点在响应 JSON 的哪个路径」，脚本按游标翻完所有页并把条目合并进来。适用于页面源码只内联前几十张、其余靠前端调接口拉的站（实测 IMDb mediaindex 页面只内联 50 张，接口里 total 是 821）"
+    },
+    "_apiSchema": {
+      "url": "接口地址，绝对或相对",
+      "method": "GET / POST，默认 GET",
+      "headers": "额外请求头（有些站靠自定义头过 WAF，如 IMDb 的 x-imdb-client-name）",
+      "body": "请求体模板（POST 用），支持 {变量} 占位",
+      "vars": "变量取值来源，语法同 endpoint.vars：'<selector>@<attr>' 或 'url:<正则>'",
+      "images": "图片节点在响应 JSON 里的路径；数组用 [] 表示展开，如 data.title.images.edges[].node",
+      "url": "从图片节点里取哪个字段当图片地址，默认 url",
+      "id": "取哪个字段当唯一 id（去重与 naming 用）",
+      "name": "取哪个字段当素材名兜底（如 caption.plainText）",
+      "page": "翻页信息所在路径，如 data.title.images.pageInfo",
+      "cursor": "下一页游标字段，如 endCursor",
+      "hasNext": "是否还有下一页的字段，如 hasNextPage",
+      "cursorIn": "游标写回请求时用的变量名，如 after",
+      "pageSize": "每页条数（仅用于给自己看的上限判断）",
+      "maxPages": "翻页安全上限，默认 60"
     },
     "resolve": [
       { "type": "attr", "selectors": ["img@data-full", "img@srcset:last", "img@src"] },
@@ -213,6 +231,48 @@
             ".image-view img@src",
             "img@src"
           ]
+        }
+      ]
+    },
+    {
+      "id": "imdb",
+      "name": "IMDb 剧集/电影图片（走 GraphQL 全量）",
+      "enabled": true,
+      "match": ["*://*.imdb.com/title/*/mediaindex/*", "*://*.imdb.com/title/*/mediaindex"],
+      "collect": {
+        "item": "a[data-testid^='mosaic-img-']",
+        "img": "img",
+        "link": "self",
+        "api": {
+          "url": "https://caching.graphql.imdb.com/",
+          "method": "POST",
+          "headers": {
+            "x-imdb-client-name": "imdb-web-next-localized",
+            "x-imdb-user-country": "US",
+            "x-imdb-user-language": "en-US"
+          },
+          "body": "{\"query\":\"query { title(id: \\\"{titleId}\\\") { images(first: 50, after: \\\"{after}\\\") { total pageInfo { hasNextPage endCursor } edges { node { id url width height caption { plainText } } } } } }\"}",
+          "vars": {
+            "titleId": ["url:/title/(tt\\d+)/"]
+          },
+          "images": "data.title.images.edges[].node",
+          "imageField": "url",
+          "idField": "id",
+          "nameField": "caption.plainText",
+          "page": "data.title.images.pageInfo",
+          "cursor": "endCursor",
+          "hasNext": "hasNextPage",
+          "cursorIn": "after",
+          "pageSize": 50,
+          "maxPages": 60
+        }
+      },
+      "_实测结论": "2026-10-23 用 facebookexternalhit UA 抓到真实 mediaindex 页 + GraphQL 逐页实测定型。①【为什么不能用 DOM】mediaindex 的 HTML 里只有 50 个 <a data-testid='mosaic-img-x-y' href='/title/tt11126994/mediaviewer/rm…/'>，每张里一个 <img class='ipc-image'>，srcSet 是 QL75_UX90_/UX135_… 这类多档缩略图。可是 __NEXT_DATA__ 里明写着 \"all_images\":{\"total\":821,\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"…\"}} —— 也就是页面源码只内联了 6%（50/821），其余靠前端调接口拉。②实测 ?page=2 / ?page=3 / ?after=<cursor> 全部返回**逐字节相同**的 50 张（服务端不分页），所以「翻页抓源码」这条路根本不通。③正解是 IMDb 自己的 GraphQL 接口 https://caching.graphql.imdb.com/（端点写在页面 runtimeConfig 里）。POST + 三个自定义头 x-imdb-client-name / x-imdb-user-country / x-imdb-user-language 即可越过 AWS WAF：实测只带 Content-Type 是 403，带上这三个头是 200。注意用户给的 facebookexternalhit UA 与普通 Chrome UA 都能通，所以脚本在浏览器里发请求没问题（浏览器 UA 反而更容易过）。④字段名是 title.images（不是 all_images，那个只在 __NEXT_DATA__ 里出现），签名 query { title(id:\"…\") { images(first:50, after:\"<cursor>\") { total pageInfo{hasNextPage endCursor} edges { node { id url width height caption{plainText} } } } } }。⑤【最关键】接口返回的 node.url 已经就是全尺寸 `._V1_.jpg`，不是缩略图！实测 rm3952838402 的 url = https://m.media-amazon.com/images/M/MV5B…@._V1_.jpg，width/height 声明 1920×818；而页面 <img> 的 src 是同一个基地址加 `_QL75_UX513_` 后缀（=513×219）。⑥【._V1_ 就是母图，不要加 UX2000】实测同一基地址：._V1_QL75_UX513_ → 513×219 / 8463B；._V1_ → 1920×818 / 73607B；._V1_UX2000_ → 2000×852 但只有 70446B（是**放大**出来的，比母图还小）；._V1_SX2000_ → 与 ._V1_ 完全相同 1920×818 / 73607B。所以去掉尺寸修饰符留下的 ._V1_ 才是真母图，加任何 UX/SX 数字都只会更差或等价。⑦用游标翻页实测 17 页拿满 821/821（每页 50，末页 21），全程 37 秒，且 821 条 url 全部已是 ._V1_.jpg、没有一条带 _UX/_SX/_CR 修饰符。⑧尺寸分布（821 张）：短边 ≥2000 有 23 张、1000–2000 有 543 张、500–1000 有 241 张、200–500 只有 14 张、<200 **零张**；最大的 7640×3260、7200×3066，最小的 640×213。所以**不需要任何尺寸过滤**，全收即可。⑨collect.api 采集到的条目带 fromApi 标记，resolveItem 会直接返回该地址、不再走 resolve 管线 —— 否则任何 rewrite/attr 步骤都可能把 ._V1_ 重新加上尺寸后缀而**降级**。⑩match 写成 mediaindex 两条（带尾斜杠与不带）：这个页面是 /title/<id>/mediaindex/，别把整个 imdb.com 都套上这条规则，否则影片主页、演员页也会被误触发。",
+      "resolve": [
+        {
+          "type": "attr",
+          "selectors": ["img@src"],
+          "allowSameThumb": true
         }
       ]
     }

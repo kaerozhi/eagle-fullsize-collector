@@ -200,7 +200,11 @@ pornpics 那条是「画廊号 + 图内序号」，在库里搜 `25875390` 就�
         "item": "a[href*='/photo/']",   // 一个条目；留空则退化为全页 img
         "img": "img",                   // 条目内的 img
         "link": "self",                 // self = 条目本身是 <a>；也可写选择器
-        "scrollToLoad": true            // 无限滚动 / 虚拟化列表必开：边走边滚、边滚边收
+        "scrollToLoad": true,           // 无限滚动 / 虚拟化列表必开：边走边滚、边滚边收
+        "pagination": {                 // 跨页相册：从分页器递归发现所有页
+          "links": "ul.pagination a[href]", "maxPages": 100
+        },
+        "api": { /* 图集不在 DOM 里时用，见《接口采集》 */ }
       },
 
       "resolve": [ /* 见下 */ ]
@@ -208,6 +212,50 @@ pornpics 那条是「画廊号 + 图内序号」，在库里搜 `25875390` 就�
   ]
 }
 ```
+
+### 接口采集（`collect.api`）：图集根本不在 DOM 里的时候
+
+有些站点的图片列表**不在 HTML 里**。IMDb 的 `mediaindex` 就是典型：页面源码只内联了
+**前 50 张**，`__NEXT_DATA__` 里 `total` 却写着 **821** —— 其余靠前端调 GraphQL 的
+cursor 分页去拉。这种站「读 DOM」注定只能拿到 6%，而 `?page=2` 之类的 URL 参数
+实测返回**逐字节相同**的 50 张（服务端根本不分页）。唯一正解是**直接打它自己的接口**。
+
+`collect.api` 就是这个能力的声明式写法 —— 规则里只写「接口在哪、参数怎么填、
+图片节点在响应的哪个路径」，翻页与去重由脚本做：
+
+```jsonc
+"api": {
+  "url": "https://caching.graphql.imdb.com/",
+  "method": "POST",
+  "headers": {                                  // 有些站靠自定义头过 WAF
+    "x-imdb-client-name": "imdb-web-next-localized",
+    "x-imdb-user-country": "US",
+    "x-imdb-user-language": "en-US"
+  },
+  "body": "{\"query\":\"… id: \\\"{titleId}\\\" … after: \\\"{after}\\\" …\"}",
+  "vars":   { "titleId": ["url:/title/(tt\\d+)/"] },   // 变量来源，语法同 endpoint
+  "images": "data.title.images.edges[].node",   // 图片节点路径，[] = 该层是数组
+  "imageField": "url",                          // 节点里哪个字段是图片地址
+  "idField": "id",                              // 哪个字段当唯一 id（去重）
+  "nameField": "caption.plainText",             // 可选，素材名兜底
+  "page": "data.title.images.pageInfo",         // 翻页信息在哪
+  "cursor": "endCursor", "hasNext": "hasNextPage",
+  "cursorIn": "after",                          // 游标写回请求的哪个变量
+  "maxPages": 60
+}
+```
+
+几个容易踩的点：
+
+- **`{after}` 首轮会被替换成空串**，而 GraphQL 把 `after: ""` 当作「从头开始」，
+  语义刚好就是第一页，所以模板里直接写死、不需要额外分支。
+- **`images` 路径用 `[]` 表示那一层是数组**：`a.b.edges[].node` = 取 `a.b.edges`
+  这个数组，对**每个元素**再取 `node`。
+- **不要用 `settings.maxItems`（默认 800）去卡接口采集。** 那是给滚动收集踩的刹车；
+  接口采集是「一次点击就该拿到全量」的语义，用 800 去卡会**静默**少几条 ——
+  IMDb 的 Arcane 正好 821 张，实测就卡在第 16 页 800 条。真正的刹车是 `maxPages`。
+- **接口条目会短路 `resolve` 管线**（`fromApi` 标记）。这是必须的：接口给的地址
+  往往已经是原图，再被 `rewrite`/`attr` 处理一次反而**降级**成缩略图。
 
 ### `resolve`：有序管线，逐级降级，第一个产出原图地址的环节胜出
 
@@ -411,11 +459,13 @@ CI（`.github/workflows/ci.yml`）会在每次 push / PR 上重跑这四步。**
 不会静默变成假绿。
 
 ```bash
-node tests/validate-rules.mjs    # 规则表结构校验
-node tests/resolve-harness.mjs   # 解析器回归：假 DOM，145 项断言
-node tests/scroll-harness.mjs    # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
-node tests/live-eporner.mjs      # 真实站点端到端：需要能访问 eporner
-node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
+node tests/validate-rules.mjs     # 规则表结构校验
+node tests/resolve-harness.mjs    # 解析器回归：假 DOM，145 项断言
+node tests/scroll-harness.mjs     # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
+node tests/pagination-harness.mjs # 跨页相册：分页递归发现，13 条条目 / 12 个分页
+node tests/imdb-harness.mjs       # 接口采集：GraphQL 游标翻页，44 项断言
+node tests/live-eporner.mjs       # 真实站点端到端：需要能访问 eporner
+node tests/live-naming.mjs        # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
 ```
 
 > `live-naming.mjs` **不进 CI** —— 它要连本机的 Eagle。但它是唯一能证明「Eagle 真的按我们算的名字存下来」的东西，
@@ -445,6 +495,8 @@ node tests/live-naming.mjs       # 真实 Eagle 端到端：需要 Eagle 在跑�
 | 14 | **pornpics**：`rewrite` 的结果**逐条等于锚点自身的 `href`**（线上 20/20），且结果里不再有 460 段；3 条互不相同 |
 | 15 | **pornpics 负例**：给同一条目加一条 `attr: img@src`，它会返回 1×1 占位图并骗过 `got !== thumb` 守卫 —— 这就是「pornpics 规则里不能写 attr」的实证 |
 | 16 | **pornpics 负例**：两个画廊各自的 `002`，`itemKey` 必须落在 `link:` 上，不能塌缩成 `id:002`（这就是「不能写 idAttr」的实证） |
+| 21 | **跨页相册**（`pagination-harness.mjs`）：分页器带省略号时，从已发现的链接**递归**走到全部 12 个分页，收到 13 条；未达 `maxPages` 上限 |
+| 22 | **接口采集**（`imdb-harness.mjs`）：`images` 路径的 `[]` 展开；游标翻 **17 页拿满 821 条**且 821 条 URL 全不重复、全是 `._V1_` 全尺寸；游标卡住只发 2 次就停；403 / GraphQL errors / 路径写错都明确失败；`fromApi` 条目短路 `resolve` |
 | 17 | **kitty-kats**：`a[href] > img` 把帖子图与头像**都**收进来（4 条），噪音留给 resolve 滤；`link` 是图床的分享页；`itemKey` 互不相同 |
 | 18 | **图床 `host` 步骤（pixhost）**：`t2/thumbs/…` → `img2/images/…`、不再带 `/thumbs/`、结果互不相同；**`t9 → img9`、`t3.pixhost.to → img3.pixhost.to`**（主机号与 tld 都是捕获组，不是写死的 `img2`）；非 pixhost 的缩略图不会被误改 |
 | 18b | **图床 `host` 步骤（imagetwist）**：`img69/th/` → `img69/i/`；**`s10` → `s10`（绝不能猜成 `img10`）**；`img202` → `img202`；已经是 `/i/` 的原图不再改；无关域名不误伤 |
@@ -652,6 +704,25 @@ https://t2.pixhost.cc/thumbs/9569/751781495_ra_petalsvol54_domini_high_0001.jpg 
 Eagle 的图重推一遍**，在素材库里堆出重复。现在重扫时命中 `sentUrls` 的条目直接标成「已发送」，
 推送会跳过它们。面板上的「重收」按钮只清空累计条目表，不动 `sentUrls`。
 
+### `imdb-harness.mjs`：接口采集（图集不在 DOM 里）
+
+IMDb 的 `mediaindex` 页面源码只有 50 张，接口里 `total` 是 821。这份测试不打网络，
+把真实响应的形状做成替身，钉死四件事：
+
+| # | 断言 |
+|---|---|
+| A | `images` 路径里的 `[]` 正确展开（`data.title.images.edges[].node` → 50 个 node，不是 edge 包装）；`_apiSchema` 里同名 key 的坑（曾把 `url` 同时当接口地址与字段名） |
+| B | 游标翻页 **17 页拿满 821 条**、17 次 POST、带齐三个 `x-imdb` 头；首轮 `after` 是空串、第二轮是上一页 `endCursor`；末页 21 条；**821 条 URL 全部已是 `._V1_` 全尺寸**、没有一条带 `_UX/_SX/_CR` 修饰符 |
+| C | 游标不前进时**只发 2 次就停**（防无限循环） |
+| D | HTTP 403 / GraphQL `errors` / `images` 路径写错 —— 三种都必须**明确失败**而不是静默返回 0 条 |
+| E | `fromApi` 条目短路 `resolve` 管线，不会被 `attr` 改回 `_QL75_UX513_` 缩略图 |
+| F | `match` 只覆盖 `mediaindex`，不误伤影片主页/影人页；`body` 里字段名必须是 `images`（不是 `__NEXT_DATA__` 里的 `all_images`） |
+
+**这份测试抓到的一个真 bug**：接口采集原本复用了 `settings.maxItems`（默认 **800**）
+当刹车，而 Arcane 正好 **821** 张 —— 于是**静默**少 21 张，卡在第 16 页 800 条。
+接口采集是「一次点击就该拿到全量」的语义，不该套用滚动收集的刹车；现在用规则自己的
+`api.maxPages`。
+
 ## 排错
 
 | 现象 | 原因 |
@@ -664,6 +735,9 @@ Eagle 的图重推一遍**，在素材库里堆出重复。现在重扫时命中
 | 收进来 / 替换后全是 **177×142** 或 **257×126** 的小图（**URL 各不相同**，所以去重拦不住） | **图床占位图。** 这两家图床拿不到原图时不返回 404，而是回 `HTTP 200` + 一张能正常解码的占位图（pixhost 主机号写错 → 257×126 / 16138 字节 `image/png`；imagetwist 主机号写错 → 177×142 / 8183 字节；**imagetwist 带外来 Referer → 177×142 / 8346 字节**）。<br>看「验证原图」的判读：**只有不带 Referer 才拿到大图 → 图床防盗链**，属于该图床的 `referrer: 'no-referrer'`（脚本替换时会自动设 `img.referrerPolicy`），推 Eagle 不受影响。<br>**只有带 Referer 才拿到大图 → 反过来**，得改成让页面自己下。<br>两种都小 → 地址解析错了（图床规律写错，比如把 `s10` 猜成 `img10`）。 |
 | 论坛帖子里图明明很多，面板却不弹 / 一张都不收 | ① 站点规则还没写 → 但页面上若有 **≥3 张**已知图床（`hosts` 表里）的图，会自动触发**通用图床论坛模式**；② 图床还没进 `hosts` 表，自动识别认不出 —— 用油猴菜单 **「通用图床论坛模式：在本页强开」**，已知图床零请求、未知的走抓分享页；③ 设置里 `autoDetectHosts` 被关了。 |
 | 论坛头像、引用的小图也被收进来了 | 合成规则的 `detail` 带了 `externalOnly: true`，只抓**外链**分享页 —— 站内链接（头像、楼层跳转）会被直接跳过。若站点规则是自己写的且没带这个字段，可以补上；或者把 `collect.item` 收窄。 |
+| IMDb 图片页只能收到 50 张，明明有几百张 | **页面源码就只有 50 张**（`__NEXT_DATA__` 里 `total` 写着真实数量），其余靠前端调 GraphQL 拉；`?page=2` 之类的 URL 参数实测返回**逐字节相同**的 50 张。`imdb` 规则靠 `collect.api` 直打接口，日志会打 `接口采集：翻了 N 页，累计 M 条`。收到 50 就是 `collect.api` 没生效（检查订阅是否更新到含 `api` 字段的版本）。 |
+| 接口采集少了几条（比如 821 张只收到 800） | 老版本会误用 `settings.maxItems`（默认 **800**）当刹车 —— 那是给滚动收集的，接口采集应该只看 `api.maxPages`。v0.7.0 已修。 |
+| 收到的图比预期小（如 513×219 而不是 1920×818） | IMDb 的 `._V1_` 是母图，`_QL75_UX513_` / `_UX2000_` 这类是尺寸修饰符 —— 注意 `_UX2000_` 反而更小（是放大出来的）。接口直给的 `url` 已是 `._V1_`，且 `fromApi` 条目会短路 `resolve`，不会再被加修饰符。 |
 | Eagle 里出现重复素材，数量少于条目数 | 页面上条目数常多于画廊的实际照片数（实测 eporner：106 个条目 → 85 张照片）。脚本推送前会按原图 URL 去重，日志打 `有 21 个条目与前面的条目指向同一张原图，已跳过`。 |
 | 推送成功但图是封面 | 该站点误配了 `detail`。检查条目链接是否与当前页同 URL。 |
 | 瀑布流滚了很久，数字却停在 20 左右不动 | 该站点是**虚拟化列表**：滚出视野的 tile 会被从 DOM 里卸载，所以静态快照永远只有当前挂载的那 ~20 个。修法是给规则的 `collect` 加 `scrollToLoad: true` —— 脚本会**边走边滚、边滚边收**并按稳定 key（id / 详情页链接）累计。跨多次「扫描本页」也会继续**累加**（不再被覆盖），所以手动滚一段再扫一次同样有效。见 `tests/scroll-harness.mjs`。 |

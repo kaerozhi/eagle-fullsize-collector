@@ -30,3 +30,9 @@ jobs:
 
       - name: 无限滚动 + 就地替换回归（假虚拟化瀑布流）
         run: node tests/scroll-harness.mjs
+
+      - name: 跨页相册回归（分页递归发现）
+        run: node tests/pagination-harness.mjs
+
+      - name: 接口采集回归（IMDb GraphQL 游标翻页）
+        run: node tests/imdb-harness.mjs

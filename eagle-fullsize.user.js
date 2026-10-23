@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.6.0
+// @version      0.7.0
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.6.0';
+  const VERSION = '0.7.0';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -308,6 +308,54 @@
         },
       ],
       delayMs: 150,
+    },
+    {
+      id: 'imdb',
+      name: 'IMDb 剧集/电影图片（走 GraphQL 全量）',
+      enabled: true,
+      match: ['*://*.imdb.com/title/*/mediaindex/*', '*://*.imdb.com/title/*/mediaindex'],
+      // ★ 这个站的图**不在 DOM 里**：mediaindex 源码只内联前 50 张
+      //   （__NEXT_DATA__ 里 total 却写着 821），其余靠前端调 GraphQL 游标分页拉。
+      //   实测 ?page=2 / ?after=<cursor> 都返回逐字节相同的 50 张（服务端不分页），
+      //   所以「翻页抓源码」这条路不通，只能直接打接口。
+      //   collect.item 仍然保留：DOM 里那 50 张是免费的，接口负责补齐剩下的，
+      //   mergeItems 按 rm id 去重，两边都写不会重复。
+      collect: {
+        item: "a[data-testid^='mosaic-img-']",
+        img: 'img',
+        link: 'self',
+        api: {
+          url: 'https://caching.graphql.imdb.com/',
+          method: 'POST',
+          // 这三个人造头是过 AWS WAF 的关键：只带 Content-Type 是 403，带上就是 200。
+          headers: {
+            'x-imdb-client-name': 'imdb-web-next-localized',
+            'x-imdb-user-country': 'US',
+            'x-imdb-user-language': 'en-US',
+          },
+          // 首轮 {after} 被替换成空串，GraphQL 把 after:"" 当「从头开始」，语义正好。
+          body:
+            '{"query":"query { title(id: \\"{titleId}\\") { images(first: 50, after: \\"{after}\\") ' +
+            '{ total pageInfo { hasNextPage endCursor } edges { node { id url width height ' +
+            'caption { plainText } } } } } }"}',
+          vars: { titleId: ['url:/title/(tt\\d+)/'] },
+          images: 'data.title.images.edges[].node',
+          imageField: 'url',
+          idField: 'id',
+          nameField: 'caption.plainText',
+          page: 'data.title.images.pageInfo',
+          cursor: 'endCursor',
+          hasNext: 'hasNextPage',
+          cursorIn: 'after',
+          pageSize: 50,
+          maxPages: 60,
+        },
+      },
+      // 接口直给的 node.url **已经是** `._V1_.jpg` 全尺寸（实测 1920x818 / 73607B），
+      // 而页面 <img> 的 src 是同一基地址加 `_QL75_UX513_`（513x219 / 8463B）。
+      // 所以接口条目一路短路（fromApi → resolveItem 直接返回），这条 attr 只是
+      // 给「DOM 里那 50 张」兜底的 —— allowSameThumb 让 src 本身就能当原图用。
+      resolve: [{ type: 'attr', selectors: ['img@src'], allowSameThumb: true }],
     },
   ];
 
@@ -939,6 +987,11 @@
     const map = new Map();
     mergeItems(map, collectItems(rule));
     const c = rule.collect || {};
+    // 接口采集排在 DOM / 分页之后：DOM 里那几十张是「免费」的，接口负责补齐剩下的。
+    // 两者都写也不冲突 —— mergeItems 按 itemKey 去重，同一个 rm id 只留一条。
+    const apiRes = await collectFromApi(rule, map, (p, total, added) => {
+      if (onPage) onPage(p, '', total, added);
+    });
     const pagination = await collectPagination(rule, map, onPage);
     // 自动滚动是**显式选择**。默认的 'follow' 模式下脚本绝不抢滚动条 ——
     // 这里只取当前挂在 DOM 里的那一批，剩下的交给 follow 采集器跟着用户滚。
@@ -950,6 +1003,7 @@
         timedOut: false,
         scrolled: false,
         ...pagination,
+        apiPages: apiRes.apiPages,
       };
     }
 
@@ -1310,6 +1364,235 @@
     }
   }
 
+  /**
+   * 「接口即图库」采集源 —— collect.api。
+   *
+   * 有些站点的图集根本不在 DOM 里：IMDb 的 mediaindex 页面源码只内联了**前 50 张**
+   * （__NEXT_DATA__ 里 total 却写着 821），其余要靠前端调 GraphQL 的 cursor 分页去拉。
+   * 这种情况「读 DOM」注定只能拿到 6%，所以必须允许规则**声明接口**，由脚本翻完所有页。
+   *
+   * 声明形态（全部是数据，不含代码）：
+   *   "api": {
+   *     "url": "https://caching.graphql.imdb.com/",
+   *     "method": "POST",
+   *     "headers": { "x-imdb-client-name": "imdb-web-next-localized" },
+   *     "body":  "{\"query\":\"…\"}",        // 支持 {var} 占位
+   *     "vars":  { "id": ["url:/title/(tt\\d+)/"] },
+   *     "images":  "data.title.images.edges[].node",   // 图片节点所在路径，[] 表示数组展开
+   *     "imageField": "url",                           // 节点里取哪个字段当图片地址
+   *     "idField":    "id",
+   *     "nameField":  "caption.plainText",             // 可选：素材名兜底
+   *     "page":    "data.title.images.pageInfo",       // 可选：翻页信息所在路径
+   *     "cursor":  "endCursor",                        // 下一页游标字段
+   *     "hasNext": "hasNextPage",
+   *     "cursorIn": "after",                           // 游标要写回请求的哪个变量
+   *     "pageSize": 50, "maxPages": 60
+   *   }
+   *
+   * 与 endpoint 的区别：endpoint 是「一次请求拿全部」，api 是「按游标翻页直到没有下一页」。
+   */
+  const API = { maxPagesDefault: 60, timeout: 40000 };
+
+  function apiPathGet(obj, path) {
+    if (!path) return obj;
+    let cur = obj;
+    for (const rawSeg of String(path).split('.')) {
+      if (cur === null || cur === undefined) return undefined;
+      const seg = rawSeg.trim();
+      if (!seg) continue;
+      const isArr = seg.endsWith('[]');
+      const key = isArr ? seg.slice(0, -2) : seg;
+      if (key) {
+        if (Array.isArray(cur)) {
+          // 数组上一层的取字段 → 展开成数组
+          cur = cur.map((x) => (x == null ? x : x[key]));
+          continue;
+        }
+        cur = cur[key];
+      }
+      if (isArr) {
+        if (!Array.isArray(cur)) return undefined;
+      }
+    }
+    return cur;
+  }
+
+  /** 把 images 路径解析成一个扁平的节点数组（支持路径中任意位置的 []）。 */
+  function apiCollectNodes(payload, path) {
+    const out = [];
+    const segs = String(path || '')
+      .split('.')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const walk = (cur, i) => {
+      if (cur === null || cur === undefined) return;
+      if (i >= segs.length) {
+        if (Array.isArray(cur)) cur.forEach((x) => x && out.push(x));
+        else out.push(cur);
+        return;
+      }
+      const seg = segs[i];
+      const isArr = seg.endsWith('[]');
+      const key = isArr ? seg.slice(0, -2) : seg;
+      const val = key ? (cur && typeof cur === 'object' ? cur[key] : undefined) : cur;
+      if (isArr) {
+        // `edges[]` = 「取 edges，然后对数组里每个元素继续往下走」
+        if (Array.isArray(val)) val.forEach((x) => walk(x, i + 1));
+        return;
+      }
+      walk(val, i + 1);
+    };
+    walk(payload, 0);
+    return out.filter(Boolean);
+  }
+
+  function apiFillTemplate(tpl, vars) {
+    let s = String(tpl);
+    for (const [k, v] of Object.entries(vars)) s = s.split('{' + k + '}').join(String(v));
+    return s;
+  }
+
+  async function collectFromApi(rule, map, onPage) {
+    const api = (rule.collect || {}).api;
+    if (!api) return { apiPages: 0, apiFailed: false };
+    const maxPages = Math.max(1, parseInt(api.maxPages, 10) || API.maxPagesDefault);
+    const pageSize = parseInt(api.pageSize, 10) || 0;
+
+    // 变量先解析一遍；翻页时 cursor 变量会被逐页覆盖
+    const vars = {};
+    for (const [name, sources] of Object.entries(api.vars || {})) {
+      for (const src of sources || []) {
+        const v = resolveVarSource(src);
+        if (v) { vars[name] = v; break; }
+      }
+    }
+
+    let pages = 0;
+    let cursor = '';
+    let failed = false;
+    const seenCursor = new Set();
+    const ep = new URL(String(api.url), location.href).href;
+    const method = String(api.method || 'GET').toUpperCase();
+
+    while (pages < maxPages) {
+      if (scanAbort) break;
+      // ★ 这里**不用** settings.maxItems（默认 800）当上限。
+      //   maxItems 是「滚动收集」的刹车，防止瀑布流无限滚；而接口采集是一次点击
+      //   就该拿到全量的语义 —— IMDb 的 Arcane 正好有 821 张，用 800 去卡会**静默**
+      //   少 21 张（实测就是卡在第 16 页 800 条）。真正的刹车是 api.maxPages。
+      if (api.maxItems > 0 && map.size >= api.maxItems) {
+        log(`接口采集已达规则设定的上限 ${api.maxItems} 条，停止翻页。`, 'warn');
+        break;
+      }
+
+      const reqVars = Object.assign({}, vars);
+      // 游标写回：`{after}` 这种占位由 cursorIn 指定名字。首轮没有游标时替换成空串，
+      // 规则模板里写成 `after: "{after}"` 会变成 `after: ""` —— GraphQL 把空串当
+      // 「从头开始」，语义正好是首轮，所以不需要额外的分支。
+      if (api.cursorIn) reqVars[api.cursorIn] = cursor || '';
+      let target = ep;
+      const headers = Object.assign({ Referer: location.href }, api.headers || {});
+      const opts = { timeout: API.timeout, headers, method };
+
+      if (method === 'POST') {
+        opts.data = apiFillTemplate(api.body || '{}', reqVars);
+        if (!headers['Content-Type'] && !headers['content-type']) {
+          headers['Content-Type'] = 'application/json';
+        }
+      } else {
+        const qs = [];
+        for (const [k, v] of Object.entries(reqVars)) {
+          if (k === api.cursorIn && !v) continue;
+          qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+        }
+        if (api.body) {
+          // GET 也允许把 body 模板整段塞进 query
+          const filled = apiFillTemplate(api.body, reqVars);
+          if (filled && filled !== '{}') qs.push(filled.replace(/^\?/, ''));
+        }
+        if (qs.length) target += (target.includes('?') ? '&' : '?') + qs.join('&');
+      }
+
+      let r;
+      try {
+        r = await gmGet(target, opts);
+      } catch (e) {
+        log('api 请求失败：' + (e && e.message ? e.message : e), 'error');
+        failed = true;
+        break;
+      }
+      if (r.status < 200 || r.status >= 300) {
+        log(`api 请求返回 HTTP ${r.status}（${shortUrl(target)}）`, 'error');
+        failed = true;
+        break;
+      }
+
+      let payload;
+      try {
+        payload = JSON.parse(r.responseText || '{}');
+      } catch (e) {
+        log('api 响应不是合法 JSON（接口可能变了）。', 'error');
+        failed = true;
+        break;
+      }
+      if (payload && payload.errors && payload.errors.length) {
+        log('api 返回错误：' + (payload.errors[0].message || JSON.stringify(payload.errors[0])), 'error');
+        failed = true;
+        break;
+      }
+
+      const nodes = apiCollectNodes(payload, api.images);
+      if (!nodes.length) {
+        log('api 响应里没找到图片节点（images 路径可能写错了）。', 'warn');
+        failed = true;
+        break;
+      }
+
+      const batch = [];
+      for (const n of nodes) {
+        const url = apiPathGet(n, api.imageField || 'url');
+        if (!url || !/^https?:/i.test(String(url))) continue;
+        const id = api.idField ? String(apiPathGet(n, api.idField) || '') : '';
+        const caption = api.nameField ? apiPathGet(n, api.nameField) : '';
+        batch.push({
+          el: null,
+          img: null,
+          thumb: String(url),   // 接口直给的通常就是原图地址本身
+          link: '',
+          externalId: id,
+          alt: caption ? String(caption) : '',
+          pageUrl: location.href,
+          baseUrl: location.href,
+          fromApi: true,        // resolveItem 见到它就直接返回本地址，不再改写
+        });
+      }
+      const added = mergeItems(map, batch);
+      pages++;
+      if (onPage) onPage(pages, map.size, added);
+
+      // 翻页信息
+      if (!api.page || !api.cursor) break;
+      const info = apiPathGet(payload, api.page);
+      const hasNext = api.hasNext ? apiPathGet(info || {}, api.hasNext) : !!apiPathGet(info || {}, api.cursor);
+      const next = apiPathGet(info || {}, api.cursor);
+      if (!hasNext || !next) break;
+      if (seenCursor.has(String(next))) {
+        log('api 分页游标没有前进，停止翻页（防止无限循环）。', 'warn');
+        break;
+      }
+      seenCursor.add(String(next));
+      cursor = String(next);
+    }
+
+    if (pages) {
+      log(
+        `接口采集：翻了 ${pages} 页，累计 ${map.size} 条（${shortUrl(ep)}）。`,
+        failed ? 'warn' : 'ok'
+      );
+    }
+    return { apiPages: pages, apiFailed: failed };
+  }
+
   async function buildEndpointIndex(step, state) {
     if (state.endpointIndex) return state.endpointIndex;
     // 并发池里会有多个 worker 同时进来，用 promise 去重，保证只发一次请求
@@ -1526,6 +1809,13 @@
   async function resolveItem(item, rule, state) {
     const thumb = item.thumb;
     const baseUrl = item.baseUrl || item.pageUrl || location.href;
+
+    // 接口采集(collect.api)拿到的地址**本身就是原图**（接口直给，没有缩略图/原图之分）。
+    // 再走一遍 resolve 只会把它改坏：IMDb 的 `._V1_.jpg` 若被某个 rewrite/attr 步骤
+    // 重新加上尺寸修饰符，反而降级成小图。所以打个标记直接短路。
+    if (item.fromApi && thumb) {
+      return { url: thumb, via: 'api', thumb };
+    }
 
     for (const step of rule.resolve || []) {
       // ---- attr：列表页 DOM 里现成的 ----
