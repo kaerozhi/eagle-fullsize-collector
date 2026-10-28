@@ -39,3 +39,6 @@ jobs:
 
       - name: 详情页条带收获回归（ImageFap {id} 定位 + harvestStrip）
         run: node tests/imagefap-harness.mjs
+
+      - name: Erome 相册回归（attr 直通 + 登记表稳定键）
+        run: node tests/erome-harness.mjs

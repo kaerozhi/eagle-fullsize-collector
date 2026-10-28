@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.8.0
+// @version      0.8.1
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.8.0';
+  const VERSION = '0.8.1';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -405,6 +405,27 @@
           ],
         },
       ],
+    },
+    {
+      id: 'erome',
+      name: 'Erome 相册',
+      enabled: true,
+      match: ['*://*.erome.com/a/*'],
+      // ★ 这个站是「三无」好站：无缩略图/原图之分（页面 <img> 的 src 就是站方能给
+      //   的最大图，灯箱 lightGallery 用的 data-src 与它完全相同）、无分页（相册
+      //   一页到底）、无防盗链（实测不带 Referer 照样 200）。
+      //   唯一的坑：每张图有两个 img（img-front / img-back，悬停切换的障眼法），
+      //   src 相同 —— 只收 img-front，另一份靠 URL 去重也拦得住。
+      //   s3/s4/s5 是同一文件的 CDN 镜像（实测三个主机返回逐字节相同的 700px 图）。
+      collect: {
+        item: 'img.img-front',
+        img: 'self',
+      },
+      // src 本身就是原图，attr 直接返回；allowSameThumb 允许结果与 thumb 相同
+      resolve: [{ type: 'attr', selectors: ['img@src'], allowSameThumb: true }],
+      // 登记表抽稳定键：路径里的目录号（/<N>/）站点明说会变
+      //（"Caution: Urls can change at any time"），但 <相册id>/<图id>.<ext> 不变。
+      pushedKeyRe: '/\\d+\\/([^/]+\\/[^/?]+)$',
     },
   ];
 
@@ -2214,12 +2235,28 @@
     const rid = (currentRule && currentRule.id) || 'norule';
     return 'pushed:' + rid + '|' + location.origin + location.pathname;
   }
-  function pushedKeyOf(url) {
+  /**
+   * 登记表键：默认取 URL 路径（签名在 query 里，天然稳定）。
+   * 规则可给 pushedKeyRe（对**路径**做 match）抽更稳定的部分 —— erome 的目录号
+   * 会变（/<N>/<相册id>/<图id>.jpeg，站点自己警告 "Urls can change at any time"），
+   * 但 <相册id>/<图id> 不会；只按整条路径登记的话，站点换个目录号就会重推。
+   */
+  function pushedKeyOf(url, keyRe) {
+    let base = '';
     try {
-      return new URL(url, location.href).pathname;
+      base = new URL(url, location.href).pathname;
     } catch (e) {
-      return String(url || '').split('?')[0];
+      base = String(url || '').split('?')[0];
     }
+    if (keyRe) {
+      try {
+        const m = base.match(new RegExp(keyRe));
+        if (m) return m[1] || m[0];
+      } catch (e) {
+        /* 正则坏了就退回整条路径 */
+      }
+    }
+    return base;
   }
   function loadPushed() {
     return new Set(store.get(pushedScopeKey(), []));
@@ -2234,11 +2271,11 @@
     return added;
   }
   /** 从待推送列表里剔掉登记表里已有的（同一张图换签名重来的那种）。 */
-  function filterAlreadyPushed(ready, pushedSet) {
+  function filterAlreadyPushed(ready, pushedSet, keyRe) {
     const fresh = [];
     const skipped = [];
     for (const x of ready || []) {
-      const k = pushedKeyOf(x.url);
+      const k = pushedKeyOf(x.url, keyRe);
       if (k && pushedSet.has(k)) skipped.push(x);
       else fresh.push(x);
     }
@@ -3261,9 +3298,14 @@
     // ★ 已推送登记表（跨刷新）：这些站点的图片 URL 每次扫描都换新签名 token，
     //   按 URL 去重拦不住「同一张图第二次推送」；URL 里的路径才是稳定标识。
     //   实测 ImageFap：第一次推送 77 张，重扫两次后库里多出一串重复 —— 就是这个坑。
+    //   规则可给 pushedKeyRe 从路径里抽更稳的部分（erome 的目录号会变，相册id/图id 不变）。
+    let pushedKeyRe = null;
+    if (currentRule && currentRule.pushedKeyRe) {
+      try { pushedKeyRe = new RegExp(currentRule.pushedKeyRe); } catch (e) { pushedKeyRe = null; }
+    }
     const pushedScope = pushedScopeKey();
     const pushedSet = loadPushed();
-    const { fresh: ready2, skipped: pushedSkipped } = filterAlreadyPushed(ready, pushedSet);
+    const { fresh: ready2, skipped: pushedSkipped } = filterAlreadyPushed(ready, pushedSet, pushedKeyRe);
     if (pushedSkipped.length) {
       for (const s of pushedSkipped) s.status = '之前已推送过，跳过';
       log(
@@ -3311,7 +3353,7 @@
       });
       for (const p of pending) { p.status = '已发送'; sentUrls.add(p.url); }
       // 登记进已推送表（按路径，跨刷新生效）—— 下次扫描就算 URL 全换成新签名也不会重推
-      const regged = rememberPushed(pushedScope, pending.map((p) => pushedKeyOf(p.url)));
+      const regged = rememberPushed(pushedScope, pending.map((p) => pushedKeyOf(p.url, pushedKeyRe)));
       if (regged) log(`已推送登记表 +${regged}（累计 ${loadPushed().size} 张）。`, 'info');
       log(`推送结束：成功 ${r.ok}，失败 ${r.failed}。`, r.failed ? 'warn' : 'ok');
     } catch (e) {

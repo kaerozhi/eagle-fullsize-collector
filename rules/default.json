@@ -306,6 +306,25 @@
           ]
         }
       ]
+    },
+    {
+      "id": "erome",
+      "name": "Erome 相册",
+      "enabled": true,
+      "match": ["*://*.erome.com/a/*"],
+      "collect": {
+        "item": "img.img-front",
+        "img": "self"
+      },
+      "pushedKeyRe": "/\\d+\\/([^/]+\\/[^/?]+)$",
+      "_实测结论": "2026-10-28 用真实相册页（/a/G1AFDTsm，83 张）实测定型。①【三无好站】无缩略图/原图之分：页面 <img> 的 src 就是站方能给的最大图 —— 灯箱（lightGallery，selector: '.img'）用的 data-src 与 <img> src 完全相同，逐字节同一个 URL；无分页（相册一页到底，HTML 里没有任何 ?page= 链接）；无防盗链（实测不带 Referer 照样 200）。②【条目形态】<div id='<图片id>'><div class='media-group' id='<序号>'><div class='img' data-src='…'><div class='img-box'><img class='img-front' src='…'><div class='img-blur'><img class='img-back' src='…'></div></div></div></div> —— 每张图有 img-front 与 img-back 两个 img（悬停切换的障眼法），src 完全相同，所以 collect.item 只写 img.img-front（83 张；就算误收 img-back 也会被 URL 去重合并）。图片没有外层 <a>，link 为空，itemKey 落在 thumb 路径上（全局唯一）。③【URL 规律】https://s<N>.erome.com/<目录号>/<相册id>/<图片id>.jpeg?v=<时间戳>。实测 s3/s4/s5 三个主机返回**逐字节相同**的文件（CDN 镜像，随便哪个都行）；目录号（1141）与 ?v= 时间戳是站方可变的缓存参数 —— 站点在 HTML 里自己写着注释 \"Caution: Urls can change at any time, please do not hotlink, thank you.\"。④【尺寸】实测 5 张：4 张 700×700、1 张 700×682 —— 700 是宽度上限（display 上限也是 width:min(100%,700px)），不存在 /thumbs/ 以外的其他尺寸路径（og:image 用的 /thumbs/ 是 250×250 小图）。页面 src 就是最大尺寸，没有更大的变体可找。⑤【本相册无视频】这个相册全是图（0 个 <video>/<source>）；erome 的相册也可能混视频，本规则只收图 —— 视频条目会被自然跳过。⑥【登记表抽稳定键】目录号会变但 <相册id>/<图片id> 不会，所以 pushedKeyRe 写 /\\d+/([^/?]+)$（对路径 match，取 G1AFDTsm/CIULRTqP.jpeg 这段）—— 站点哪天换了目录号，已推送登记表照样认得出同一张图。⑦【请求量极省】resolve 是纯 attr 零请求，站点只承担 Eagle 下载图片本身的流量；83 张相册从扫描到推完只有 Eagle 的 83 次图片下载。",
+      "resolve": [
+        {
+          "type": "attr",
+          "selectors": ["img@src"],
+          "allowSameThumb": true
+        }
+      ]
     }
   ]
 }
