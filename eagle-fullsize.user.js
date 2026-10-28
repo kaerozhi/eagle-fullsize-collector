@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.8.1
+// @version      0.8.2
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.8.1';
+  const VERSION = '0.8.2';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -426,6 +426,25 @@
       // 登记表抽稳定键：路径里的目录号（/<N>/）站点明说会变
       //（"Caution: Urls can change at any time"），但 <相册id>/<图id>.<ext> 不变。
       pushedKeyRe: '/\\d+\\/([^/]+\\/[^/?]+)$',
+    },
+    {
+      id: 'xvideos',
+      name: 'XVideos 相册',
+      enabled: true,
+      match: ['*://*.xvideos.com/profiles/*/photos/*'],
+      // ★ 条目的 <a href> 直接就是原图直链（…/<uuid>/0/full.jpg?secure=<自己的签名>，
+      //   实测 750×1000 / 99779B；缩略图 …/0/thumb.jpg 才 270×360 / 18514B）——
+      //   secure 按路径签（实测把 thumb 换成 full 拿旧签名请求是 403），所以改写是
+      //   死路，但连 detail 都不用：link 步骤直接返回条目 href，零请求。
+      //   相册一页到底（gal JSON 里 nb_pictures=39，页面恰好 39 个 full 链接，无分页）。
+      //   无防盗链：full.jpg 带不带 Referer 都是 200。
+      collect: {
+        item: "a[href*='/full.jpg']",
+        img: 'img',
+        link: 'self',
+      },
+      resolve: [{ type: 'link' }],
+      delayMs: 250,
     },
   ];
 
@@ -2023,6 +2042,18 @@
           if (got && (got !== thumb || step.allowSameThumb === true) && /^https?:/i.test(got)) {
             return { url: got, via: 'attr:' + spec, thumb };
           }
+        }
+        continue;
+      }
+
+      // ---- link：条目自己的 <a href> 就是原图地址 ----
+      // 有些站（实测 xvideos 相册）的条目是 <a href="<原图直链>"><img src="<缩略图>"></a>，
+      // 原图直链带着它自己的合法签名直接写在 href 里 —— 比 detail 一次请求都不用发。
+      // 与 attr 的 allowSameThumb 语义一致：默认要求 href ≠ thumb，规则可显式放开。
+      if (step.type === 'link') {
+        const u = String(item.link || '');
+        if (/^https?:/i.test(u) && (u !== thumb || step.allowSameThumb === true)) {
+          return { url: u, via: 'link', thumb };
         }
         continue;
       }

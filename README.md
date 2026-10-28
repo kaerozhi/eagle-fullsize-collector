@@ -263,6 +263,7 @@ cursor 分页去拉。这种站「读 DOM」注定只能拿到 6%，而 `?page=2
 |---|---|---|
 | `endpoint` | **最强。** 按规则声明的站点接口发**一次**请求，把响应里所有原图直链挖出来建成 `id → 原图` 索引，每个条目只查表 | 站点有「一次返回整组」的接口（见 eporner：一次请求拿全 85 张） |
 | `attr` | 直接从列表页 DOM 读：`img@data-full`、`img@srcset:last`、`img@src` | 页面本身就藏了原图地址（最常见、最快） |
+| `link` | 条目自己的 `<a href>` 就是原图直链（实测 xvideos 相册：`<a href="…/full.jpg?secure=…">` 包着缩略图）。**零请求**。默认要求 href ≠ 缩略图，`allowSameThumb: true` 放开 | 原图直链带着自己的合法签名写在条目链接里 —— 比 detail 一次请求都不用发 |
 | `rewrite` | 对缩略图 URL 做正则改写，**零请求** | 原图地址能从缩略图**推导出来**（如 Pinterest `236x/` → `originals/`） |
 | `host` | 拿缩略图 URL 去顶层 **`hosts`（图床表）**里找匹配的记录，按它的 `thumbRe`/`fullTo` 改写，**零请求** | **论坛场景的正解**：用户可以自由从各种图床贴图，一个站点一条规则从根上不成立 —— 见下文《图床表》 |
 | `pagedata` | 从页面自身数据里按「同目录 + 同 id」找原图：扒页面源码 + 挂钩 XHR/fetch 抓 viewer 响应 + 页面上已显示的大图 | `endpoint` 失效时的兜底 |
@@ -497,6 +498,7 @@ node tests/pagination-harness.mjs # 跨页相册：分页递归发现，13 条�
 node tests/imdb-harness.mjs       # 接口采集：GraphQL 游标翻页，44 项断言
 node tests/imagefap-harness.mjs   # 详情条带收获：{id} 定位 + harvestStrip + 保守步行熔断，46 项断言
 node tests/erome-harness.mjs      # Erome 相册：attr 直通 + 登记表稳定键，23 项断言
+node tests/xvideos-harness.mjs    # XVideos 相册：link 步骤零请求直通，27 项断言
 node tests/live-eporner.mjs       # 真实站点端到端：需要能访问 eporner
 node tests/live-naming.mjs        # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
 ```
@@ -532,6 +534,7 @@ node tests/live-naming.mjs        # 真实 Eagle 端到端：需要 Eagle 在跑
 | 22 | **接口采集**（`imdb-harness.mjs`）：`images` 路径的 `[]` 展开；游标翻 **17 页拿满 821 条**且 821 条 URL 全不重复、全是 `._V1_` 全尺寸；游标卡住只发 2 次就停；403 / GraphQL errors / 路径写错都明确失败；`fromApi` 条目短路 `resolve` |
 | 23 | **详情条带收获**（`imagefap-harness.mjs`，46 项）：`a[name]` 当 id、滑动窗口分页器递归走完（含 page=0 自引用按 id 去重 0 新增）；`{id}` 占位符**定位当前那张**而不是邻居、抠不出 id 时整体跳过回落 `og:image`；`harvestStrip` 让同窗口兄弟条目**只发 1 次详情请求**、跨窗口照常重发、缓存命中 `via=detail:strip` 可辨识；`match` 不误伤 `/photo/` 详情页；**保守步行**——连续 3 次失败熔断（page=4/5 不再被碰）、连续 8 页 0 新增熔断（11 页只走 9 页）、规则的 `paginationDelayMs=1200/concurrency=2/delayMs=400`；**已推送登记表**——同一张图换新签名必须被认出来、GM 存储往返幂等 |
 | 24 | **Erome 相册**（`erome-harness.mjs`，23 项）：`img.img-front` 命中且 `img-back`（同 URL 的悬停副本）与 logo/头像噪音不算数；attr 直通返回 src 本身（站方最大图，灯箱 data-src 同款）；`match` 不误伤用户页/首页；**登记表稳定键**——目录号变了（1141→9999）键不变（`pushedKeyRe` 抽出 `<相册id>/<图id>`），新旧目录号一起被剔、其他站不带 `pushedKeyRe` 仍按整条路径 |
+| 25 | **XVideos 相册**（`xvideos-harness.mjs`，27 项）：条目是 `<a href=原图>`，`link: self` 让条目 link 直接是 full.jpg（缩略图是内层 img）；`link` 步骤零请求直通、每条解析成自己的 full（uuid 全局唯一防串图）、双 CDN 主机原样保留；守卫——href===thumb 默认拒绝（`allowSameThumb` 放开）、非 http/空 link 拒绝；`match` 不误伤视频页与资料页 |
 | 17 | **kitty-kats**：`a[href] > img` 把帖子图与头像**都**收进来（4 条），噪音留给 resolve 滤；`link` 是图床的分享页；`itemKey` 互不相同 |
 | 18 | **图床 `host` 步骤（pixhost）**：`t2/thumbs/…` → `img2/images/…`、不再带 `/thumbs/`、结果互不相同；**`t9 → img9`、`t3.pixhost.to → img3.pixhost.to`**（主机号与 tld 都是捕获组，不是写死的 `img2`）；非 pixhost 的缩略图不会被误改 |
 | 18b | **图床 `host` 步骤（imagetwist）**：`img69/th/` → `img69/i/`；**`s10` → `s10`（绝不能猜成 `img10`）**；`img202` → `img202`；已经是 `/i/` 的原图不再改；无关域名不误伤 |

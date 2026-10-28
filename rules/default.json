@@ -325,6 +325,24 @@
           "allowSameThumb": true
         }
       ]
+    },
+    {
+      "id": "xvideos",
+      "name": "XVideos 相册",
+      "enabled": true,
+      "match": ["*://*.xvideos.com/profiles/*/photos/*"],
+      "collect": {
+        "item": "a[href*='/full.jpg']",
+        "img": "img",
+        "link": "self"
+      },
+      "_实测结论": "2026-10-28 用真实相册页（/profiles/qin_wei_ying_jie/photos/6240033/_2020_，39 张）实测定型。①【条目形态】每个条目是三层包裹：<div class='thumb-block' id='galpic-N'><div class='thumb-inside'><div class='thumb embed-responsive embed-responsive-4by3'><a class='embed-responsive-item' href='https://gallery-<cdn>.xvideos-cdn.com/<uuid>/0/full.jpg?secure=<签名>' target='_blank' data-lg-item='1'><picture><img class='gallery-picture' src='…/<uuid>/0/thumb.jpg?secure=<另一个签名>'></picture></a> —— ★ <a> 的 href 直接就是该图的 full 原图直链（带它自己的合法签名），缩略图在里面的 <img class='gallery-picture'>。所以 collect.item 用 a[href*='/full.jpg']，link: 'self' 让条目 link = 原图地址。②【为什么不能用 rewrite】secure 是按「完整路径」签的：实测拿 thumb 的签名把文件名换成 full.jpg/photo.jpg/1.jpg 全部 403（868 字节拒绝页）—— 和 ImageFap 同型的坑。但这里连 detail 都不用：新 resolve 步骤 {type:'link'} 直接返回条目 href，零请求。③【尺寸实测】full.jpg = 750×1000 / 99779 字节（同图 thumb = 270×360 / 18514 字节）；带不带 Referer 都是 200，无防盗链。④【分页】无 —— 相册 JSON（内嵌 gal 对象）里 nb_pictures=39，页面恰好 39 个 full 链接，39 张全在首屏 DOM。⑤【双 CDN】缩略图与原图混用 gallery-cdn77（32 张）与 gallery-gcore（7 张）两种主机，每个条目的 thumb 与 full 用同一家 —— 规则不用关心，href 指哪家用哪家。⑥【resolve 顺序】{type:'link'} 要放在最前面用 —— 它零请求且必定命中；如果哪天站点把 href 换成了详情页而非直链，可以再补 detail 兜底。⑦【登记表】full.jpg 的路径（/<uuid>/0/full.jpg）跨扫描稳定（uuid 不变），登记表默认按整条路径记即可，无需 pushedKeyRe。⑧【视频】XVideos 主站以视频为主，本规则只匹配 /profiles/*/photos/* 相册页，不会误伤视频页。",
+      "resolve": [
+        {
+          "type": "link"
+        }
+      ],
+      "delayMs": 250
     }
   ]
 }

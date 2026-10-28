@@ -18,7 +18,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const file = resolve(here, '..', 'rules', 'default.json');
 
 /** resolve 管线的合法策略。新增策略时必须同步这里，否则新规则会被误判为非法。 */
-const STEP_TYPES = new Set(['attr', 'rewrite', 'host', 'endpoint', 'pagedata', 'probe', 'detail']);
+const STEP_TYPES = new Set(['attr', 'rewrite', 'host', 'endpoint', 'pagedata', 'probe', 'detail', 'link']);
 
 /** 每种策略必须带的字段。写在这里，让「少写字段」在 CI 里就红，而不是等到用户报告。 */
 const STEP_REQUIRED = {
@@ -29,6 +29,7 @@ const STEP_REQUIRED = {
   detail: ['selectors'],
   endpoint: ['url', 'vars'],
   pagedata: [],
+  link: [],
 };
 
 const problems = [];

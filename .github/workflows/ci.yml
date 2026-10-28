@@ -42,3 +42,6 @@ jobs:
 
       - name: Erome 相册回归（attr 直通 + 登记表稳定键）
         run: node tests/erome-harness.mjs
+
+      - name: XVideos 相册回归（link 步骤零请求直通）
+        run: node tests/xvideos-harness.mjs
