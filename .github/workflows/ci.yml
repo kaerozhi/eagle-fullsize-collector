@@ -36,3 +36,6 @@ jobs:
 
       - name: 接口采集回归（IMDb GraphQL 游标翻页）
         run: node tests/imdb-harness.mjs
+
+      - name: 详情页条带收获回归（ImageFap {id} 定位 + harvestStrip）
+        run: node tests/imagefap-harness.mjs

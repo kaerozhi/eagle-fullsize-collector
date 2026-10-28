@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updated": "2026-10-23",
+  "updated": "2026-10-28",
   "note": "Eagle 大图批量收藏 —— 订阅规则表。维护方式同 AdBlock 列表：一个站点一条规则，删/改/加都只动本文件。resolve 是一个有序管线，逐级降级，第一个产出原图 URL 的环节胜出。",
   "_schema": {
     "id": "唯一标识，本地覆盖会按 id 合并",
@@ -275,6 +275,34 @@
           "allowSameThumb": true
         }
       ]
+    },
+    {
+      "id": "imagefap",
+      "name": "ImageFap 相册",
+      "enabled": true,
+      "match": ["*://*.imagefap.com/pictures/*"],
+      "collect": {
+        "item": "a[href^='/photo/']",
+        "img": "img",
+        "link": "self",
+        "idAttr": "self@name",
+        "pagination": { "links": "a[href*='view=']", "maxPages": 60 }
+      },
+      "_实测结论": "2026-10-28 用真实相册页（/pictures/12884638/，668 张）+ 详情页实测定型。①【条目形态】<a name='733468870' href='/photo/733468870/?pgid=&gid=12884638&page=0'> 里一个 img，src 就是 cdnc 缩略图 https://cdnc.imagefap.com/images/thumb/116/733/<id>.jpg?secure=<签名>；alt 里写着 '1 of 668 pics'。a[name] 就是图片 id，故 idAttr 写 self@name —— itemKey 变成 id:<id>，跨分页去重稳。②【分页】每页 24 张（27 页 × 24 + 末页 20 = 668）；分页器是**滑动窗口**：page=0 只露出 0..9，翻到 9 才露出 10..18……递归发现能走完全部 28 页。分页链接是 ?gid=…&page=N&view=0，而 /photo/ 条目链接不带 view=，所以 links 用 a[href*='view='] 精确认出分页器。③【为什么不能用 rewrite】thumb 是 /images/thumb/<a>/<b>/<id>.jpg?secure=<签名A>，原图是 /images/full/<a>/<b>/<id>.jpg?secure=<签名B> —— secure 是按「路径+尺寸」签的，把 thumb 改成 full 拿签名 A 去请求，实测 HTTP 403（868 字节拒绝页）；去掉 secure 参数同样 403。所以改写这条路死路。④【正解：detail + 精确定位】/photo/<id>/ 详情页的 ul.thumbs 条带里每个 <li> 的 <a href> 直接就是该图的 /full/ 原图直链（带自己的合法签名，实测 1800×2633 / 445057 字节，带不带 Referer 都是 200），还带 dimension='2700x1756'、imageid='…' 属性；但条带里 24 个 li 形态完全相同（无 selected 类、无 og:image），**唯一能定位「当前这张」的就是 imageid** —— 所以 selectors 用 a[imageid='{id}']@original（original 与 href 同值），{id} 占位符从 item.externalId / 缩略图文件名按 idFromThumb 展开出真实 id。⑤【harvestStrip 优化】条带里同时带着**同窗口其他 23 张**的原图直链 —— 全部收进 state.detailStrip（按 imageid 键），兄弟条目解析时直接命中缓存、不再发请求。实测 668 张的相册详情请求从 668 次降到 ~28 次（每个分页窗口 1 次）。⑥【验证过 full 的真实尺寸】strip 里非当前图的 full 直链同样有效：id 491505865 → 1800×2633 / 445057 字节；当前图 733468870 → dimension 声明 2700×1756。带不带 Referer 都是 200，规则不需要 referer 字段。⑦【为什么不走 endpoint】endpoint 只发一次请求，而详情页条带只覆盖当前分页窗口的 24 张，覆盖不了全相册；collectFromApi 又只认 JSON+游标。detail+harvestStrip 正好落在现有机制上，且每条独立可并行、可断点续跑。⑧match 只写 /pictures/*，别把 /photo/ 详情页本身套上规则。",
+      "resolve": [
+        {
+          "type": "detail",
+          "excludeThumb": true,
+          "harvestStrip": "a[imageid]@imageid",
+          "idFromThumb": "([0-9]{6,})",
+          "selectors": [
+            "a[imageid='{id}']@original",
+            "a[imageid='{id}']@href",
+            "meta[property='og:image']@content"
+          ]
+        }
+      ],
+      "delayMs": 200
     }
   ]
 }

@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.7.0
+// @version      0.7.1
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.7.0';
+  const VERSION = '0.7.1';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -356,6 +356,48 @@
       // 所以接口条目一路短路（fromApi → resolveItem 直接返回），这条 attr 只是
       // 给「DOM 里那 50 张」兜底的 —— allowSameThumb 让 src 本身就能当原图用。
       resolve: [{ type: 'attr', selectors: ['img@src'], allowSameThumb: true }],
+    },
+    {
+      id: 'imagefap',
+      name: 'ImageFap 相册',
+      enabled: true,
+      match: ['*://*.imagefap.com/pictures/*'],
+      collect: {
+        // 条目：<a name="<图片id>" href="/photo/<id>/?...">，img 的 src 是 cdnc 缩略图
+        //（alt 里写着 "N of <总数> pics"，但总数得靠分页器走完才知道）。
+        item: "a[href^='/photo/']",
+        img: 'img',
+        link: 'self',
+        // a[name] 就是图片 id —— itemKey 变成 id:<id>，跨分页去重稳。
+        idAttr: 'self@name',
+        // 分页器是滑动窗口：page=0 只露出 0..9，翻到 9 才露出 10..18 …… 递归发现
+        // 能走完全部页。分页链接是 ?gid=…&page=N&view=0；/photo/ 链接不带 view=，
+        // 所以用 view= 精确认出分页器。
+        pagination: { links: "a[href*='view=']", maxPages: 60 },
+      },
+      // ★ 不能用 rewrite：thumb 是 /images/thumb/<a>/<b>/<id>.jpg?secure=<签名A>，
+      //   原图是 /images/full/…?secure=<签名B> —— secure 是按「路径+尺寸」签的，
+      //   把 thumb 改成 full 后拿着签名 A 去请求，实测 HTTP 403（868 字节的拒绝页）。
+      // ★ 正解是 detail：/photo/<id>/ 详情页的 ul.thumbs 条带里，每个 <li> 的
+      //   <a href> 直接就是该图的 /full/ 原图直链（带自己的合法签名），
+      //   还带 dimension="2700x1756" 属性。用 a[imageid='{id}'] 精确定位当前图。
+      // ★ harvestStrip：条带里同时带着同窗口其他 23 张的原图直链 —— 全部收进
+      //   state.detailStrip 共享，兄弟条目直接命中缓存，不再发请求。
+      //   实测 668 张的相册：详情请求从 668 次降到 ~28 次（每个分页窗口 1 次）。
+      resolve: [
+        {
+          type: 'detail',
+          excludeThumb: true,
+          harvestStrip: 'a[imageid]@imageid',
+          idFromThumb: '([0-9]{6,})',
+          selectors: [
+            "a[imageid='{id}']@original",
+            "a[imageid='{id}']@href",
+            "meta[property='og:image']@content",
+          ],
+        },
+      ],
+      delayMs: 200,
     },
   ];
 
@@ -1768,18 +1810,68 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // 5.4 detail：抓详情页取原图
-  async function fetchDetailImage(link, rule, thumb) {
+  /**
+   * 抓详情页取原图。
+   *
+   * v0.7.1 起支持两个新能力（都是为 ImageFap 这类站点加的，实测取证见 rules）：
+   * ① selectors 里的 `{id}` 占位符 —— 有的详情页上多张图共用一套标记，唯一能
+   *    定位「当前这张」的就是它的数字 id（如 `a[imageid='{id}']@href`）。
+   *    id 从 item.externalId 或缩略图文件名按 step.idFromThumb 的正则抠出来。
+   * ② `step.harvestStrip: '<选择器>@<idAttr>'` —— 详情页的缩略图条（strip）里往往
+   *    **顺带带着同窗口其他图的原图直链**（ImageFap 实测：一个 /photo/<id>/ 的
+   *    ul.thumbs 里有 24 条 /full/ 直链，正好是这个分页窗口的全部图）。
+   *    把它们按 id 收进 state.detailStrip 跨条目共享，同一窗口的兄弟条目就
+   *    **不用再发请求** —— ImageFap 实测 668 张图的详情请求从 668 次降到 ~28 次。
+   */
+  async function fetchDetailImage(link, rule, thumb, state = {}, itemId = '') {
+    const step = rule.resolve.find((s) => s.type === 'detail') || {};
+
+    // ① 收获表命中：这个 id 的原图直链之前某个详情页已经带出来过
+    if (step.harvestStrip) {
+      if (!state.detailStrip) state.detailStrip = new Map();
+      if (itemId && state.detailStrip.has(itemId)) {
+        return { url: state.detailStrip.get(itemId), via: 'detail:strip' };
+      }
+    }
+
     const r = await gmGet(link, {
       timeout: 25000,
       headers: rule.referer ? { Referer: rule.referer } : {},
     });
     if (r.status < 200 || r.status >= 400) throw new Error('HTTP ' + r.status);
     const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
-    const specs = (rule.resolve.find((s) => s.type === 'detail') || {}).selectors || [
+    const specs = step.selectors || [
       "meta[property='og:image']@content",
       'img@src',
     ];
-    const excludeThumb = (rule.resolve.find((s) => s.type === 'detail') || {}).excludeThumb !== false;
+    const excludeThumb = step.excludeThumb !== false;
+
+    // ② 收获：把这个详情页上能认出的「id → 原图直链」全记下来，给兄弟条目用
+    if (step.harvestStrip) {
+      const spec = String(step.harvestStrip);
+      const at = spec.lastIndexOf('@');
+      const sel = at > 0 ? spec.slice(0, at) : spec;
+      const idAttr = at > 0 ? spec.slice(at + 1) : 'imageid';
+      try {
+        for (const a of doc.querySelectorAll(sel)) {
+          const id = a.getAttribute(idAttr);
+          const u = a.getAttribute('href') || a.getAttribute('original') || '';
+          if (id && /^https?:/i.test(u) && !state.detailStrip.has(String(id))) {
+            state.detailStrip.set(String(id), u);
+          }
+        }
+      } catch (e) {
+        /* 收获失败不影响本条目的解析 */
+      }
+    }
+
+    // ③ {id} 占位符展开
+    let idForSel = itemId || '';
+    if (!idForSel && thumb && specs.some((s) => String(s).includes('{id}'))) {
+      const m = baseName(thumb).match(new RegExp(step.idFromThumb || '([0-9]{4,})'));
+      if (m) idForSel = m[1];
+    }
+
     const norm = (u) => {
       try {
         const x = new URL(u, link);
@@ -1791,11 +1883,14 @@
     };
     const thumbNorm = norm(thumb || '');
     for (const spec of specs) {
-      const got = readSelectorAttr(doc, spec);
-      if (!got) continue;
-      if (!/\.(jpe?g|png|webp|gif|avif|bmp)(\?|$)/i.test(got) && spec.includes('@content')) {
-        // og:image 一般是图片直链；不是也先收着
+      // {id} 抠不出来就跳过这条 —— 绝不能让带占位符的字面选择器去瞎匹配
+      let concrete = String(spec);
+      if (concrete.includes('{id}')) {
+        if (!idForSel) continue;
+        concrete = concrete.split('{id}').join(idForSel);
       }
+      const got = readSelectorAttr(doc, concrete);
+      if (!got) continue;
       if (excludeThumb && thumbNorm && norm(got) === thumbNorm) continue;
       return { url: got, via: 'detail:' + spec };
     }
@@ -1979,7 +2074,15 @@
           continue;
         }
         try {
-          const got = await fetchDetailImage(item.link, rule, thumb);
+          // 条目 id：externalId（ImageFap 的 a[name]）或缩略图文件名里的数字。
+          // detail 靠它做两件事：{id} 占位符展开、strip 收获表的命中/写入。
+          const dStep0 = rule.resolve.find((s) => s.type === 'detail') || {};
+          let itemId = String(item.externalId || '');
+          if (!itemId && dStep0.idFromThumb && thumb) {
+            const m = baseName(thumb).match(new RegExp(dStep0.idFromThumb));
+            if (m) itemId = m[1] || '';
+          }
+          const got = await fetchDetailImage(item.link, rule, thumb, state, itemId);
           if (rule.delayMs) await sleep(rule.delayMs);
           return { url: got.url, via: got.via, thumb };
         } catch (e) {
