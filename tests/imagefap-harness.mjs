@@ -141,7 +141,10 @@ console.log('\n== B. 滑动窗口分页：递归发现走完全部 ' + PAGES + '
   // 镜像 collectAll 的真实顺序：当前页条目先入表，分页再合并
   EBC.mergeItems(map, EBC.collectItems(rule));
   const before = map.size;
-  const res = await EBC.collectPagination(rule, map, () => {});
+  // 真规则每页之间 sleep 1200ms —— 测试里关掉（行为一样，不用等 7 秒）
+  const fast = JSON.parse(JSON.stringify(rule));
+  fast.paginationDelayMs = 0;
+  const res = await EBC.collectPagination(fast, map, () => {});
   // 5 个真分页 + 1 个 page=0 自引用（真实站点行为：分页器有「首页」链接，
   // 与无参 URL 是同一页面，条目按 id 去重后无害）
   ok('抓了 ' + PAGES + ' 个分页（含 1 个自引用）', res.pagesFetched === PAGES, String(res.pagesFetched));
@@ -214,6 +217,113 @@ console.log('\n== F. 规则本身：match 范围 ==');
   ok('harvestStrip 声明为 a[imageid]@imageid', rule.resolve[0].harvestStrip === 'a[imageid]@imageid');
   ok('idFromThumb 是 6 位数字', rule.resolve[0].idFromThumb === '([0-9]{6,})');
   ok('分页器认 view=（/photo/ 链接不带 view=，不会误收）', rule.collect.pagination.links === "a[href*='view=']");
+  // ★ 保守步行参数（用户实测被打验证码后定下的）：分页每页之间歇 1.2s，
+  //   detail 2 个 worker、每个歇 400ms —— 慢是故意的。
+  ok('paginationDelayMs=1200（分页步行节流）', rule.paginationDelayMs === 1200, String(rule.paginationDelayMs));
+  ok('concurrency=2（detail 并发压到 2）', rule.concurrency === 2, String(rule.concurrency));
+  ok('delayMs=400（detail 间隔）', rule.delayMs === 400, String(rule.delayMs));
+}
+
+console.log('\n== G. 保守步行熔断：被限流时必须停，不许把队列打完 ==');
+{
+  // 场景 1：连续失败。page0 的分页器指向 1..5，其中 1/2/3 返回 403，4/5 本来有货。
+  // 老行为会把 4/5 也试一遍（每失败一次还继续），这里必须在第 3 次失败时熔断。
+  const g = 999001;
+  const base0 = `${ORIGIN}/pictures/${g}/G`;
+  const pageDoc = (n) => {
+    const b = new El('body');
+    for (let k = 0; k < 2; k++) {
+      const a = new El('a', { name: String(5000 + n * 10 + k), href: `/photo/${5000 + n * 10 + k}/?gid=${g}&page=${n}` });
+      a.appendChild(new El('img', { src: `https://cdnc.imagefap.com/images/thumb/1/2/${5000 + n * 10 + k}.jpg?s=x` }));
+      b.appendChild(a);
+    }
+    const pager = new El('div');
+    for (const q of [1, 2, 3, 4, 5]) pager.appendChild(new El('a', { href: `?gid=${g}&page=${q}&view=0` }));
+    b.appendChild(pager);
+    return fakeDocument(b);
+  };
+  const hit = new Set();
+  const e1 = loadEbc({
+    document: pageDoc(0),
+    location: { href: base0, hostname: 'www.imagefap.com', origin: ORIGIN },
+    gmGet: async (o) => {
+      const u = abs(String(o.url));
+      hit.add(u);
+      const m = String(u).match(/page=(\d+)/);
+      const n = m ? Number(m[1]) : 0;
+      if (n >= 1 && n <= 3) return { status: 403, responseText: '' };
+      return { status: 200, responseText: u };
+    },
+  });
+  e1.sandbox.DOMParser = class { parseFromString(t) { return pageDoc(Number((t.match(/page=(\d+)/) || [0, 0])[1])); } };
+  const r1rule = JSON.parse(JSON.stringify(rule));
+  r1rule.paginationDelayMs = 0;
+  const m1 = new Map();
+  e1.EBC.mergeItems(m1, e1.EBC.collectItems(r1rule));
+  const res1 = await e1.EBC.collectPagination(r1rule, m1, () => {});
+  ok('第 3 次连续失败就熔断', res1.paginationStopped === true, JSON.stringify(res1));
+  ok('熔断后不再碰 page=4/5', ![...hit].some((u) => /page=[45]/.test(u)), [...hit].join(' '));
+
+  // 场景 2：连续 0 新增（站点拿重复内容喂你）。11 页全是同样 2 条。
+  const g2 = 999002;
+  const base2 = `${ORIGIN}/pictures/${g2}/G`;
+  const dupDoc = (() => {
+    const b = new El('body');
+    for (let k = 0; k < 2; k++) {
+      const a = new El('a', { name: String(7000 + k), href: `/photo/${7000 + k}/?gid=${g2}&page=0` });
+      a.appendChild(new El('img', { src: `https://cdnc.imagefap.com/images/thumb/1/2/${7000 + k}.jpg?s=x` }));
+      b.appendChild(a);
+    }
+    const pager = new El('div');
+    for (let q = 1; q <= 11; q++) pager.appendChild(new El('a', { href: `?gid=${g2}&page=${q}&view=0` }));
+    b.appendChild(pager);
+    return fakeDocument(b);
+  })();
+  const seen2 = [];
+  const e2 = loadEbc({
+    document: dupDoc,
+    location: { href: base2, hostname: 'www.imagefap.com', origin: ORIGIN },
+    gmGet: async (o) => { const u = abs(String(o.url)); seen2.push(u); return { status: 200, responseText: u }; },
+  });
+  e2.sandbox.DOMParser = class { parseFromString() { return dupDoc; } };
+  const r2rule = JSON.parse(JSON.stringify(rule));
+  r2rule.paginationDelayMs = 0;
+  const m2 = new Map();
+  const res2 = await e2.EBC.collectPagination(r2rule, m2, () => {});
+  ok('连续 8 页 0 新增 → 熔断', res2.paginationStopped === true, JSON.stringify(res2));
+  ok('熔断后剩余分页不再请求（11 页只走了 9 页）', seen2.length === 9, String(seen2.length));
+  ok('重复内容只登记一次（id 去重）', m2.size === 2, String(m2.size));
+}
+
+console.log('\n== H. 已推送登记表：换签名的同一张图必须被认出来 ==');
+{
+  // push 时登记的是 resolved URL 的路径；重扫拿到新 token，路径不变
+  const old = fullUrl(photoId(0, 0));                       // …/full/116/733/1000.jpg?secure=FULL_1000
+  const renewed = old.replace('secure=FULL_1000', 'secure=BRAND_NEW_TOKEN');
+  ok('pushedKeyOf 取的是路径（不含 query/token）', EBC.pushedKeyOf(old) === '/images/full/116/733/1000.jpg', EBC.pushedKeyOf(old));
+  ok('新旧签名 URL 的路径相同（登记表能认出是同一张）', EBC.pushedKeyOf(renewed) === EBC.pushedKeyOf(old));
+  const { fresh, skipped } = EBC.filterAlreadyPushed(
+    [{ url: old, status: '就绪' }, { url: renewed, status: '就绪' }, { url: fullUrl(photoId(0, 1)), status: '就绪' }],
+    new Set([EBC.pushedKeyOf(old)])
+  );
+  // 旧签名与新签名是同一张图 —— 两张都该被剔掉，只留没见过的那张
+  ok('登记过的被剔掉（新旧签名一起算同一张）', skipped.length === 2, JSON.stringify(skipped.map((x) => x.url)));
+  ok('没登记过的保留', fresh.length === 1 && fresh[0].url === fullUrl(photoId(0, 1)), JSON.stringify(fresh.map((x) => x.url)));
+  ok('thumb 与 full 路径不同（登记表只对 resolved URL 负责，这正好）', EBC.pushedKeyOf(thumbUrl(photoId(0, 0))) !== EBC.pushedKeyOf(old));
+  // rememberPushed/loadPushed 走 GM 存储往返
+  const store2 = new Map();
+  const again2 = loadEbc({
+    document: fakeDocument(),
+    location: { href: galleryUrl(0), hostname: 'www.imagefap.com', origin: ORIGIN, pathname: '/pictures/12884638/Some%20Gallery' },
+    gmStore: store2,
+  });
+  again2.EBC.__set({ currentRule: rule });
+  const scope = again2.EBC.pushedScopeKey();
+  ok('scope 按 规则+画廊 分开', scope === 'pushed:imagefap|https://www.imagefap.com/pictures/12884638/Some%20Gallery', scope);
+  again2.EBC.rememberPushed(scope, [EBC.pushedKeyOf(old)]);
+  ok('rememberPushed 写入、loadPushed 读回（GM 存储往返）', again2.EBC.loadPushed().has('/images/full/116/733/1000.jpg'));
+  again2.EBC.rememberPushed(scope, [EBC.pushedKeyOf(old)]); // 重复登记不炸也不加
+  ok('重复登记幂等', again2.EBC.loadPushed().size === 1);
 }
 
 console.log(`\n${process.exitCode ? '❌ 有失败' : '✅ 全部通过'}（${pass} 项）\n`);

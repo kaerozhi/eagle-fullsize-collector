@@ -174,7 +174,7 @@ export function fakeDocument(body = new El('body')) {
  * @param {object}   [o.location]
  * @returns {{ EBC:object, sandbox:object, requested:string[] }}
  */
-export function loadEbc({ gmGet, document: doc, location: loc } = {}) {
+export function loadEbc({ gmGet, document: doc, location: loc, gmStore = null } = {}) {
   let src = fs.readFileSync(SCRIPT, 'utf8');
 
   const LOG_SIG = '  function log(msg, level) {\n    const els = ui || buildUI();';
@@ -194,6 +194,7 @@ export function loadEbc({ gmGet, document: doc, location: loc } = {}) {
     '\n  globalThis.__EBC__ = { eagle, resolveItem, readSelectorAttr, buildEndpointIndex, collectItems, paginationLinks, collectPagination, pathDir, dedupeByUrl, BUILTIN_RULES, collectAll, mergeItems, itemKey, usableUrl, SCROLL, findRuleFor, applyReplacements, followPass, settings, subscriptionUrlOf, DEFAULT_SETTINGS, buildItemName, baseNameOfUrl, isWeakBase, sanitizeName,' +
     '\n    BUILTIN_HOSTS, findHost, activeHosts, hostNames, genericGalleryRule, detectHostGallery, HOST_GALLERY_DETAIL_SELECTORS, ruleset, applyRemoteHosts,' +
     '\n    collectFromApi, apiCollectNodes, apiPathGet, apiFillTemplate, rulesDefault: (typeof rules !== "undefined" ? rules : null),' +
+    '\n    pushedScopeKey, pushedKeyOf, loadPushed, rememberPushed, filterAlreadyPushed, PAGINATION,' +
     '\n    __set: (o) => { if ("resolvedCache" in o) resolvedCache = o.resolvedCache; if ("currentRule" in o) currentRule = o.currentRule; if ("accum" in o) accum = o.accum; if ("scanAbort" in o) scanAbort = o.scanAbort; },' +
     '\n    __get: () => ({ resolvedCache, accum, resolvedByKey, sentUrls, followFilled }) };\n' +
     src.slice(ci);
@@ -233,8 +234,9 @@ export function loadEbc({ gmGet, document: doc, location: loc } = {}) {
         search: '',
       },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-    GM_getValue: (_k, d) => d,
-    GM_setValue() {},
+    // gmStore：传一个 Map 进来就能模拟 GM 存储的读写（已推送登记表等持久化测试用）
+    GM_getValue: (k, d) => (gmStore && gmStore.has(k) ? gmStore.get(k) : d),
+    GM_setValue(k, v) { if (gmStore) gmStore.set(k, v); },
     GM_registerMenuCommand() {},
     GM_addStyle() {},
     GM_notification() {},

@@ -290,6 +290,20 @@ cursor 分页去拉。这种站「读 DOM」注定只能拿到 6%，而 `?page=2
 而是回一张能正常解码的占位图（见下文），而 `probe` 只看「加载成功」。
 `detail` 有三个自动守卫：① 条目链接若与当前页同 URL（仅 `#hash` 不同）直接跳过；② 连续失败 ≥8 次自动停用，避免被限流刷屏；③ 可选 `externalOnly: true` —— 只抓**外链**，论坛帖子里头像/引用/楼层链接全是站内链接，一条 `externalOnly` 就把噪音滤干净。
 
+**分页步行（`collect.pagination`）自带「保守步行」三件套** —— 用户在 ImageFap 被打验证码的教训：
+
+- **页与页之间强制停顿**：`paginationDelayMs`（规则级，不写则取 `delayMs` 且不低于 500ms）。
+  ImageFap 那次 36 个分页 35 秒抓完（每秒一个请求），站点直接把会话标记为可疑 —— 慢是功能。
+- **连续 ≥3 个分页抓取失败 → 熔断停走**：被限流时别把整个队列打完，越打验证越严。
+- **连续 ≥8 页 0 新增 → 熔断停走**：站点开始拿重复内容喂你（验证码后的典型表现 ——
+  实测所有 `?page=N` 都回第一页的内容，序列号永远停在 ~109）。阈值取 8 是因为实测里
+  存在**合法**的 0 新增连击（站点会把某些分页 302 到已抓过的页，连着 4 页 +0 之后又继续出图）。
+
+**已推送登记表**（配合分页相册的时效签名 URL）：这些站点的图片 URL 每次扫描都会换新签名
+（`?secure=<token>`），按 URL 去重拦不住「同一张图第二次推送」。URL 里真正稳定的是**路径**，
+所以推送成功后按路径登记（分「规则+画廊」存 GM 存储，跨刷新生效）；下次扫描哪怕 URL 全换了
+新签名，同一张图也会被认出来跳过。登记表**不**被「重收」清空 —— 那是防重推的保险丝。
+
 `detail` 另有两个为 ImageFap 加的能力（实测取证见订阅表）：
 
 - **`{id}` 占位符**：有的详情页上多张图共用一套标记，唯一能定位「当前这张」的就是它的数字 id
@@ -477,7 +491,7 @@ node tests/resolve-harness.mjs    # 解析器回归：假 DOM，145 项断言
 node tests/scroll-harness.mjs     # 无限滚动 + 就地替换回归：假虚拟化瀑布流，37 项断言
 node tests/pagination-harness.mjs # 跨页相册：分页递归发现，13 条条目 / 12 个分页
 node tests/imdb-harness.mjs       # 接口采集：GraphQL 游标翻页，44 项断言
-node tests/imagefap-harness.mjs   # 详情条带收获：{id} 定位 + harvestStrip，30 项断言
+node tests/imagefap-harness.mjs   # 详情条带收获：{id} 定位 + harvestStrip + 保守步行熔断，46 项断言
 node tests/live-eporner.mjs       # 真实站点端到端：需要能访问 eporner
 node tests/live-naming.mjs        # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
 ```
@@ -511,7 +525,7 @@ node tests/live-naming.mjs        # 真实 Eagle 端到端：需要 Eagle 在跑
 | 16 | **pornpics 负例**：两个画廊各自的 `002`，`itemKey` 必须落在 `link:` 上，不能塌缩成 `id:002`（这就是「不能写 idAttr」的实证） |
 | 21 | **跨页相册**（`pagination-harness.mjs`）：分页器带省略号时，从已发现的链接**递归**走到全部 12 个分页，收到 13 条；未达 `maxPages` 上限 |
 | 22 | **接口采集**（`imdb-harness.mjs`）：`images` 路径的 `[]` 展开；游标翻 **17 页拿满 821 条**且 821 条 URL 全不重复、全是 `._V1_` 全尺寸；游标卡住只发 2 次就停；403 / GraphQL errors / 路径写错都明确失败；`fromApi` 条目短路 `resolve` |
-| 23 | **详情条带收获**（`imagefap-harness.mjs`）：`a[name]` 当 id、滑动窗口分页器递归走完（含 page=0 自引用按 id 去重 0 新增）；`{id}` 占位符**定位当前那张**而不是邻居、抠不出 id 时整体跳过回落 `og:image`；`harvestStrip` 让同窗口兄弟条目**只发 1 次详情请求**、跨窗口照常重发、缓存命中 `via=detail:strip` 可辨识；`match` 不误伤 `/photo/` 详情页 |
+| 23 | **详情条带收获**（`imagefap-harness.mjs`，46 项）：`a[name]` 当 id、滑动窗口分页器递归走完（含 page=0 自引用按 id 去重 0 新增）；`{id}` 占位符**定位当前那张**而不是邻居、抠不出 id 时整体跳过回落 `og:image`；`harvestStrip` 让同窗口兄弟条目**只发 1 次详情请求**、跨窗口照常重发、缓存命中 `via=detail:strip` 可辨识；`match` 不误伤 `/photo/` 详情页；**保守步行**——连续 3 次失败熔断（page=4/5 不再被碰）、连续 8 页 0 新增熔断（11 页只走 9 页）、规则的 `paginationDelayMs=1200/concurrency=2/delayMs=400`；**已推送登记表**——同一张图换新签名必须被认出来、GM 存储往返幂等 |
 | 17 | **kitty-kats**：`a[href] > img` 把帖子图与头像**都**收进来（4 条），噪音留给 resolve 滤；`link` 是图床的分享页；`itemKey` 互不相同 |
 | 18 | **图床 `host` 步骤（pixhost）**：`t2/thumbs/…` → `img2/images/…`、不再带 `/thumbs/`、结果互不相同；**`t9 → img9`、`t3.pixhost.to → img3.pixhost.to`**（主机号与 tld 都是捕获组，不是写死的 `img2`）；非 pixhost 的缩略图不会被误改 |
 | 18b | **图床 `host` 步骤（imagetwist）**：`img69/th/` → `img69/i/`；**`s10` → `s10`（绝不能猜成 `img10`）**；`img202` → `img202`；已经是 `/i/` 的原图不再改；无关域名不误伤 |
@@ -754,6 +768,8 @@ IMDb 的 `mediaindex` 页面源码只有 50 张，接口里 `total` 是 821。�
 | 接口采集少了几条（比如 821 张只收到 800） | 老版本会误用 `settings.maxItems`（默认 **800**）当刹车 —— 那是给滚动收集的，接口采集应该只看 `api.maxPages`。v0.7.0 已修。 |
 | 收到的图比预期小（如 513×219 而不是 1920×818） | IMDb 的 `._V1_` 是母图，`_QL75_UX513_` / `_UX2000_` 这类是尺寸修饰符 —— 注意 `_UX2000_` 反而更小（是放大出来的）。接口直给的 `url` 已是 `._V1_`，且 `fromApi` 条目会短路 `resolve`，不会再被加修饰符。 |
 | ImageFap 全是 200×130 小图 / 推送 403 | 该站缩略图 `?secure=<签名>` 是**按路径+尺寸签的**：把 `/thumb/` 改写成 `/full/` 拿旧签名去请求，实测 403（868 字节拒绝页）—— 所以这条规则用 `detail` 抓 `/photo/<id>/` 取条带里的合法 `/full/` 直链，绝不能写 `rewrite`。 |
+| ImageFap 弹了验证码，之后只解析出一小部分 | 分页步行太快被风控了。v0.8.0 起分页每页之间强制停顿（`paginationDelayMs`，该站 1200ms）、连续 3 次失败或连续 8 页 0 新增就熔断停走。**弹验证码后别急着重扫** —— 越急拉黑越久；等几分钟，已收集的条目还在，点「扫描本页」会接着累计。 |
+| ImageFap 重扫后 Eagle 里多出一串重复 | 旧版按完整 URL 去重，而这种站的图片 URL 每次扫描都换新签名 token —— 同一张图第二次推送拦不住。v0.8.0 起按**图片路径**登记已推送（跨刷新生效），同一张图换新签名也会被认出来跳过。真想整卷重推：换一个 Eagle 收藏目录，或临时把规则禁用再启用。 |
 | ImageFap 相册只收到 24 张（明明有几百张） | 每页 24 张，其余在分页里；规则靠 `collect.pagination` 递归走滑动窗口。只收到一页说明订阅没更新到带 `pagination` 的版本，或分页器链接没被 `a[href*='view=']` 认出。 |
 | ImageFap 收的图是别人的（错位） | 详情页条带 24 个 `<li>` 形态完全相同，定位靠 `a[imageid='{id}']`。若 `{id}` 抠错了（缩略图文件名里数字段变了），会拿到邻居的图 —— 检查规则里 `idFromThumb` 的正则是否还匹配当前站点形态。 |
 | Eagle 里出现重复素材，数量少于条目数 | 页面上条目数常多于画廊的实际照片数（实测 eporner：106 个条目 → 85 张照片）。脚本推送前会按原图 URL 去重，日志打 `有 21 个条目与前面的条目指向同一张原图，已跳过`。 |

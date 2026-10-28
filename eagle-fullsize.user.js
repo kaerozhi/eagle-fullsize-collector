@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.7.1
+// @version      0.8.0
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.7.1';
+  const VERSION = '0.8.0';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -362,6 +362,14 @@
       name: 'ImageFap 相册',
       enabled: true,
       match: ['*://*.imagefap.com/pictures/*'],
+      // ★ 防爬很凶的站（用户实测：36 个分页 35 秒抓完 → 验证码，之后 detail 全灭，
+      //   668 张只救回 77 张）。所以全部请求都放慢：
+      //   paginationDelayMs=1200 —— 分页步行每页之间歇 1.2 秒（28~36 页 ≈ 半分钟）；
+      //   concurrency=2 + delayMs=400 —— detail 请求 2 个 worker、每个歇 400ms。
+      //   慢是故意的：这条路的意义是「不惊动站点地把全相册拿下来」，不是抢速度。
+      concurrency: 2,
+      delayMs: 400,
+      paginationDelayMs: 1200,
       collect: {
         // 条目：<a name="<图片id>" href="/photo/<id>/?...">，img 的 src 是 cdnc 缩略图
         //（alt 里写着 "N of <总数> pics"，但总数得靠分页器走完才知道）。
@@ -397,7 +405,6 @@
           ],
         },
       ],
-      delayMs: 200,
     },
   ];
 
@@ -984,17 +991,38 @@
    * 递归发现并抓取分页。只依赖页面上声明的分页链接，不猜 URL 模板；
    * 这样既能处理 3006.html → 3006_2.html，也能处理带省略号的分页器。
    * 每个远程页面在条目上保留自己的 baseUrl，relative src/link 才不会被当前页误解析。
+   *
+   * v0.8.0 起带「保守步行」三件套 —— 用户在 ImageFap 实测被打验证码的教训：
+   * 36 个分页 35 秒抓完（每秒一个请求，零停顿），站点直接把会话标记为可疑，
+   * 之后所有 detail 请求拿回验证码页，668 张只救回 77 张。所以：
+   * ① 页与页之间强制 sleep（paginationDelayMs，缺省取 delayMs 且不低于 500ms）；
+   * ② 连续 ≥3 个分页抓取失败 → 熔断停走（被限流时别把整个队列打完，越打越糟）；
+   * ③ 连续 ≥8 页 0 新增 → 熔断停走（站点在拿重复内容喂你，比如验证码后所有
+   *    ?page=N 都回第一页 —— 用户实测后两次扫描序列号永远停在 ~109 就是这个）。
+   *    阈值取 8 是因为实测里存在**合法**的 0 新增连击：站点会把某些分页 302 到
+   *    已抓过的页，ImageFap 那次连着 4 页 +0 之后又继续出图，所以不能太敏感。
    */
+  const PAGINATION = { emptyStop: 8, failStop: 3 };
+
   async function collectPagination(rule, map, onPage) {
     const p = (rule.collect || {}).pagination;
-    if (!p) return { pagesFetched: 0, paginationCapped: false, paginationAborted: false };
+    if (!p) return { pagesFetched: 0, paginationCapped: false, paginationAborted: false, paginationStopped: false };
     const cap = parseInt(settings.maxItems, 10) || 0;
     const maxPages = Math.max(1, parseInt(p.maxPages, 10) || 100);
+    const pd = parseInt(rule.paginationDelayMs, 10);
+    // 规则没写 paginationDelayMs 时回落到 delayMs，且**不低于 500ms** —— 拿别人的
+    // 服务器当本机 API 使唤，哪个站都会翻脸。
+    const pageDelayMs = Number.isFinite(pd) && pd >= 0
+      ? pd
+      : Math.max(500, parseInt(rule.delayMs, 10) || 0);
     const queue = paginationLinks(rule, document, location.href);
     const seen = new Set([canonicalPageUrl(location.href)]);
     let pagesFetched = 0;
     let paginationCapped = false;
     let paginationAborted = false;
+    let paginationStopped = false;
+    let failStreak = 0;
+    let emptyStreak = 0;
 
     while (queue.length && pagesFetched < maxPages) {
       if (scanAbort) { paginationAborted = true; break; }
@@ -1006,18 +1034,44 @@
         const doc = await fetchPaginationDocument(url, rule);
         const added = mergeItems(map, collectItems(rule, doc, url));
         pagesFetched++;
+        failStreak = 0;
         if (onPage) onPage(pagesFetched, url, map.size, added);
         if (cap > 0 && map.size >= cap) { paginationCapped = true; break; }
         for (const next of paginationLinks(rule, doc, url)) {
           if (!seen.has(next)) queue.push(next);
         }
+        if (added === 0) {
+          emptyStreak++;
+          if (emptyStreak >= PAGINATION.emptyStop) {
+            paginationStopped = true;
+            log(
+              `连续 ${emptyStreak} 页没有新增条目 —— 站点多半已经开始拿重复内容喂你` +
+                '（限流/验证码的典型表现）。停止翻页，过几分钟再「扫描本页」；' +
+                '已收到的条目会保留。', 'error'
+            );
+            break;
+          }
+        } else {
+          emptyStreak = 0;
+        }
+        if (queue.length && pageDelayMs > 0) await sleep(pageDelayMs);
       } catch (e) {
         pagesFetched++;
-        log(`分页 ${url} 抓取失败：${e && e.message ? e.message : e}`, 'warn');
+        failStreak++;
+        log(`分页 ${url} 抓取失败（连续第 ${failStreak} 次）：${e && e.message ? e.message : e}`, 'warn');
+        if (failStreak >= PAGINATION.failStop) {
+          paginationStopped = true;
+          log(
+            `连续 ${failStreak} 个分页抓取失败 —— 多半被限流或弹了验证码。**停止翻页**，` +
+              '别继续打请求把验证越惹越严；已收到的条目保留，等几分钟再「扫描本页」会接着累计。',
+            'error'
+          );
+          break;
+        }
       }
     }
     if (queue.length && pagesFetched >= maxPages) paginationCapped = true;
-    return { pagesFetched, paginationCapped, paginationAborted };
+    return { pagesFetched, paginationCapped, paginationAborted, paginationStopped };
   }
 
   /**
@@ -2143,6 +2197,54 @@
     return { unique, dupes };
   }
 
+  /* ============================================================
+   * 5.x 已推送登记表 —— 跨刷新防止把同一张图重复推进 Eagle
+   *
+   * 用户在 ImageFap 实测的教训：这些站点的图片 URL 带时效签名
+   * （?secure=<token>,<过期时间>），**每次扫描都会换新**。所以：
+   *  · 同一次会话里，sentUrls（按完整 URL）能防重推；
+   *  · 但刷新页面/隔天再扫，URL 全变了，按 URL 去重形同虚设，
+   *    同一张图会再进一次 Eagle —— 用户库里堆出一串序列号 ≤109 的重复。
+   * URL 里**真正稳定的是路径**（/images/full/116/733/<id>.jpg —— 签名在 query）。
+   * 所以按「路径」登记已推送的图，按 当前规则+当前画廊 分 scope 存进 GM 存储。
+   * 登记表故意**不**被「重收」清空 —— 那是防重推的保险丝；真要整卷重推时
+   * 把订阅里的规则禁用再启用（或换目录）即可绕开。
+   * ============================================================ */
+  function pushedScopeKey() {
+    const rid = (currentRule && currentRule.id) || 'norule';
+    return 'pushed:' + rid + '|' + location.origin + location.pathname;
+  }
+  function pushedKeyOf(url) {
+    try {
+      return new URL(url, location.href).pathname;
+    } catch (e) {
+      return String(url || '').split('?')[0];
+    }
+  }
+  function loadPushed() {
+    return new Set(store.get(pushedScopeKey(), []));
+  }
+  function rememberPushed(scopeKey, keys) {
+    const set = new Set(store.get(scopeKey, []));
+    let added = 0;
+    for (const k of keys || []) {
+      if (k && !set.has(k)) { set.add(k); added++; }
+    }
+    store.set(scopeKey, Array.from(set));
+    return added;
+  }
+  /** 从待推送列表里剔掉登记表里已有的（同一张图换签名重来的那种）。 */
+  function filterAlreadyPushed(ready, pushedSet) {
+    const fresh = [];
+    const skipped = [];
+    for (const x of ready || []) {
+      const k = pushedKeyOf(x.url);
+      if (k && pushedSet.has(k)) skipped.push(x);
+      else fresh.push(x);
+    }
+    return { fresh, skipped };
+  }
+
   /**
    * 加素材端点候选矩阵。
    *
@@ -2727,7 +2829,10 @@
       const n = accum.map.size;
       accum = { scope: accum.scope, map: new Map() };
       resolvedCache = [];
-      log(`已清空累计的 ${n} 条，下次「扫描本页」从头收集。（已发送记录保留，不会重推）`, 'info');
+      log(
+        `已清空累计的 ${n} 条，下次「扫描本页」从头收集。（已发送记录与已推送登记表保留，` +
+          '进过 Eagle 的图不会被重推）', 'info'
+      );
       renderList();
       renderStatus();
     };
@@ -3030,6 +3135,13 @@
     if (col.paginationAborted) {
       log('分页收集已停止（你按了「停止滚动」）。已收集的分页条目会保留。', 'warn');
     }
+    if (col.paginationStopped) {
+      log(
+        '分页收集被安全熔断中断（连续失败或连续 0 新增）。已收到的条目会保留 —— ' +
+          '休息几分钟再点「扫描本页」会接着累计，别急着重试，越急越容易被站点拉黑。',
+        'warn'
+      );
+    }
     if (col.scrolled) log(`滚动收集结束：滚了 ${col.rounds} 轮。`, 'info');
     if (col.capped) {
       log(
@@ -3146,6 +3258,24 @@
       log('没有待发送的原图。先「扫描本页」。', 'warn');
       return;
     }
+    // ★ 已推送登记表（跨刷新）：这些站点的图片 URL 每次扫描都换新签名 token，
+    //   按 URL 去重拦不住「同一张图第二次推送」；URL 里的路径才是稳定标识。
+    //   实测 ImageFap：第一次推送 77 张，重扫两次后库里多出一串重复 —— 就是这个坑。
+    const pushedScope = pushedScopeKey();
+    const pushedSet = loadPushed();
+    const { fresh: ready2, skipped: pushedSkipped } = filterAlreadyPushed(ready, pushedSet);
+    if (pushedSkipped.length) {
+      for (const s of pushedSkipped) s.status = '之前已推送过，跳过';
+      log(
+        `有 ${pushedSkipped.length} 张命中「已推送登记表」，跳过（同一张图之前已经进过 Eagle；` +
+          '本次扫描拿到的是新签名 URL，按 URL 去重拦不住它）。登记表按图片路径跨刷新生效。',
+        'info'
+      );
+    }
+    if (!ready2.length) {
+      log('待发送的原图全部都已推送过（登记表命中），没有新图要发。', 'warn');
+      return;
+    }
     // 发送前先把「到底要发哪些 URL」摊开。用户实测里 Eagle 里 106 张变成了同一张小图，
     // 而「解析器把 106 条都解析成同一个 URL」和「URL 各不相同但被 Eagle/站点搞成一张」
     // 这两种情况的修法完全不同 —— 这行日志一眼就能分开。
@@ -3159,7 +3289,7 @@
     // ★ 同一个原图地址只发一次。页面条目数可能多于画廊的实际照片数
     //   （实测 eporner：106 个条目 → 85 张照片），不去重就会在 Eagle 里
     //   塞进 21 组重复素材，而日志和计数看起来完全正常。
-    const { unique: pending, dupes } = dedupeByUrl(ready);
+    const { unique: pending, dupes } = dedupeByUrl(ready2);
     for (const d of dupes) d.status = '重复，已跳过';
     if (dupes.length) {
       log(
@@ -3180,6 +3310,9 @@
         ui.st.textContent = `推送中 ${done}/${total}（成功 ${ok} 失败 ${failed}）`;
       });
       for (const p of pending) { p.status = '已发送'; sentUrls.add(p.url); }
+      // 登记进已推送表（按路径，跨刷新生效）—— 下次扫描就算 URL 全换成新签名也不会重推
+      const regged = rememberPushed(pushedScope, pending.map((p) => pushedKeyOf(p.url)));
+      if (regged) log(`已推送登记表 +${regged}（累计 ${loadPushed().size} 张）。`, 'info');
       log(`推送结束：成功 ${r.ok}，失败 ${r.failed}。`, r.failed ? 'warn' : 'ok');
     } catch (e) {
       log('推送失败：' + e.message, 'error');

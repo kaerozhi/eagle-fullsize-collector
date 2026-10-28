@@ -11,6 +11,7 @@
     "referer": "抓详情页/图片时带的 Referer，防盗链站点必填",
     "concurrency": "detail 策略的并发数，默认 5",
     "delayMs": "每个 detail 请求之间的间隔，默认 120；站点限流严就加大",
+    "paginationDelayMs": "可选。分页步行每页之间的停顿毫秒数；不写则取 delayMs 且不低于 500。防爬严的站点必调大（imagefap 用 1200）",
     "collect": {
       "item": "「一个条目」的选择器（如详情页链接 / 卡片）。留空则退化为按 img 全页收集",
       "img": "条目内部的 img 选择器，默认 img",
@@ -281,6 +282,9 @@
       "name": "ImageFap 相册",
       "enabled": true,
       "match": ["*://*.imagefap.com/pictures/*"],
+      "concurrency": 2,
+      "delayMs": 400,
+      "paginationDelayMs": 1200,
       "collect": {
         "item": "a[href^='/photo/']",
         "img": "img",
@@ -301,8 +305,7 @@
             "meta[property='og:image']@content"
           ]
         }
-      ],
-      "delayMs": 200
+      ]
     }
   ]
 }
