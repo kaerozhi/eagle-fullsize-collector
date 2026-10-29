@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.8.2
+// @version      0.8.3
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.8.2';
+  const VERSION = '0.8.3';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -445,6 +445,32 @@
       },
       resolve: [{ type: 'link' }],
       delayMs: 250,
+    },
+    {
+      id: 'xsnvshen',
+      name: '秀色女神 相册',
+      enabled: true,
+      match: ['*://*.xsnvshen.com/album/*'],
+      // ★★ 直推 Eagle 是死路（实测）：图片防盗链按 Referer 校验，且必须是
+      //   相册页本身的 URL（站点首页 Referer 都不行）—— Eagle 服务端下载
+      //   不带 Referer，add 返回 id 但素材永远不会落地（item/get 轮询 30s total=0）。
+      //   正确用法：**「替换页面图片」+ Eagle 官方扩展批量收藏** —— 页面声明
+      //   <meta name="referrer" content="always">，浏览器下载会带上完整相册页
+      //   Referer，能过校验（站点自己的图片就是这么加载的）。
+      directPush: false,
+      collect: {
+        // 内容图 src 是 //img.xsnvshen.com/album/<N>/<相册id>/<NNN>.jpg（单引号属性，
+        // 无 class）。相关推荐的封面图是 /thumb_205x308/album/… 路径 —— 用
+        // '.com/album/' 做 contains 能精确区分（封面是 .com/thumb_205x308/album/，
+        // 不含 .com/album/ 这个子串）。
+        item: "img[src*='.com/album/']",
+        img: 'self',
+        // 分页干净利落：?p=2..6，页面上明写「共 60 张」（10 张/页）。
+        pagination: { links: "a[href*='?p=']", maxPages: 60 },
+      },
+      // src 本身就是原图（实测 2400×1600，WebP 内容伪装 .jpg 后缀，Content-Type 谎报
+      // image/jpeg —— Eagle 扩展按魔数识别，无碍）。attr 直通，零请求。
+      resolve: [{ type: 'attr', selectors: ['img@src'], allowSameThumb: true }],
     },
   ];
 
@@ -3320,6 +3346,18 @@
     buildUI();
     if (!resolvedCache.length) {
       await scan();
+    }
+    // ★ directPush: false 的规则 —— 图片有按 Referer 校验的防盗链，Eagle 服务端
+    //   下载（不带 Referer）必然 403，素材永远不会落地。实测 xsnvshen：add 返回
+    //   id，item/get 轮询 30 秒 total=0。大声警告但仍然继续（万一用户的 Eagle
+    //   走了带 Referer 的代理，让它试试）。
+    if (currentRule && currentRule.directPush === false) {
+      log(
+        `⚠️ 「${currentRule.name}」的图片带按 Referer 校验的防盗链 —— **直推 Eagle 会静默失败**` +
+          '（实测：add 返回 id，但 Eagle 服务端下载被 403 挡住，素材永远不会出现）。' +
+          '请改用「替换页面图片」+ Eagle 官方扩展批量收藏：浏览器下载会带上相册页的 Referer，能过校验。',
+        'error'
+      );
     }
     const ready = resolvedCache.filter((x) => x.url && x.status !== '已发送');
     if (!ready.length) {

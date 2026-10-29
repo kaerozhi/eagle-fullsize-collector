@@ -343,6 +343,26 @@
         }
       ],
       "delayMs": 250
+    },
+    {
+      "id": "xsnvshen",
+      "name": "秀色女神 相册",
+      "enabled": true,
+      "match": ["*://*.xsnvshen.com/album/*"],
+      "directPush": false,
+      "collect": {
+        "item": "img[src*='.com/album/']",
+        "img": "self",
+        "pagination": { "links": "a[href*='?p=']", "maxPages": 60 }
+      },
+      "_实测结论": "2026-10-28 用真实相册页（/album/44777，共 60 张 / 6 页）+ Eagle 实机推送实测定型。①【★★ 直推 Eagle 是死路，务必看】图片防盗链按 Referer 校验，且 Referer 必须是相册页本身的 URL —— 实测矩阵：Chrome UA + 无 Referer → 403；+ 站点首页 Referer → 403；+ 相册页 Referer → 200（UA 无关，IE8 UA 也 200）。Eagle 服务端下载不带 Referer：实测 POST /api/v2/item/add 返回 id（MVTKN36RLHYUG），item/get 轮询 30 秒 total=0 —— 素材永远不落地。所以 directPush: false（脚本推送时会大声警告），正确用法是【替换页面图片 + Eagle 官方扩展批量收藏】：页面声明 <meta name='referrer' content='always'>，浏览器下载会带上完整相册页 Referer 过校验（站点自己的图片就是这么加载的）。②【条目形态】内容图 <img src='//img.xsnvshen.com/album/<N>/<相册id>/<NNN>.jpg' loading='eager'>（单引号属性、无 class、protocol-relative）。相关推荐的封面图是 //img.xsnvshen.com/thumb_205x308/album/… —— collect.item 用 img[src*='.com/album/'] 精确区分（封面路径是 .com/thumb_205x308/album/，不含 .com/album/ 这个子串）。图片没有外层 <a>，itemKey 落在 thumb 路径上。③【分页】每页 10 张，页面上明写『共 60 张』；分页链接干净利落 /album/44777?p=2 … ?p=6（首页无参数），递归发现一遍走完；翻页后图片编号顺序递增（000-009 / 010-019 / …），无省略号无滑动窗口。④【尺寸】页面 src 本身就是原图：实测 2400×1600（WebP 内容伪装 .jpg 后缀，Content-Type 谎报 image/jpeg —— Eagle 扩展按魔数识别，无碍）。不存在更大的尺寸路径；og:image 的 /thumb_205x308/ 是封面小图。⑤【脚本侧零图片请求】resolve 是纯 attr 直通；脚本只会为翻页抓 5 个 HTML（每页 ~20KB），图片本体全部由 Eagle 扩展在浏览器里下载（带 Referer）。⑥【WebP】浏览器显示、Eagle 扩展收藏都没问题；若 Eagle 版本较老不认 webp 内容的 .jpg 文件，素材会以原字节入库（魔数是 RIFF/WEBP），不影响使用。",
+      "resolve": [
+        {
+          "type": "attr",
+          "selectors": ["img@src"],
+          "allowSameThumb": true
+        }
+      ]
     }
   ]
 }
