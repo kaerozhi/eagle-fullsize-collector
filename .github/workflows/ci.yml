@@ -48,3 +48,6 @@ jobs:
 
       - name: 秀色女神相册回归（分页 + directPush 警告）
         run: node tests/xsnvshen-harness.mjs
+
+      - name: E-Hentai 相册回归（allowNoImg + detail 两跳）
+        run: node tests/ehentai-harness.mjs

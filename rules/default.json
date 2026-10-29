@@ -363,6 +363,34 @@
           "allowSameThumb": true
         }
       ]
+    },
+    {
+      "id": "ehentai",
+      "name": "E-Hentai 相册（detail 两跳）",
+      "enabled": true,
+      "match": ["*://*.e-hentai.org/g/*", "*://*.exhentai.org/g/*"],
+      "collect": {
+        "item": "a[href*='.org/s/']",
+        "img": "img",
+        "link": "self",
+        "allowNoImg": true,
+        "pagination": { "links": "a[href*='?p=']", "maxPages": 60 }
+      },
+      "_实测结论": "2026-10-29 用真实相册页（/g/2314039/26f9b65dac/，388 张 / 20 页）+ /s/ 查看页实测定型。①【条目形态】#gdt 容器里 <a href='https://e-hentai.org/s/<imgkey10>/<gid>-<页号>'> 包一个**没有 <img> 的 div** —— 缩略图画在 CSS background（style='width:200px;height:200px;background:transparent url(https://ehgt.org/…jpg_l.jpg) 0 0 no-repeat'），div 的 title 属性还写着『Page 1: <原始文件名>』。所以 collect 必须 allowNoImg: true（thumb 为空、itemKey 落在 link 上，/s/ 链接全局唯一），item 用 a[href*='.org/s/']（.org 同时覆盖 e-hentai.org 与 exhentai.org）。②【数量与分页】页面明写 Showing 1 - 20 of 388 images：388 张 / 20 页（每页 20）；分页器是滑动窗口（1..7 + 跳页按钮 + 20），links 用 a[href*='?p='] 递归发现能走完（?p=0 是第一页的显式链接，canonical 去重后无害）。③【解析 = detail 两跳】/s/ 查看页只有 ~4.7KB，里面 <img id='img' src='https://<H@H节点>:8443/h/<hash>/<keystamp=…;fileindex=…;xres=org>/<原始文件名>.jpg'> —— 大图从 H@H 客户端节点出，**原始文件名就在 URL basename 里**（实测 xizi1840_1268957224996495362_20200606_012553_img1.jpg，命名白送，连 alt 兜底都不需要）。selectors 用 img[id='img']@src。④【直推可行】实测 hath 大图 URL 不带 Referer 也是 200（1080×1080 JPEG）—— 与 xsnvshen 相反，这个站可以直推 Eagle；keystamp 是时效签名，推送后 Eagle 立刻下载没问题。⑤【限速是生死线】388 张 = 388 个 /s/ 页，每张都要真实抓取（/s/ 页只有自己那一张图，没有条带可收割）；e-hentai 对快速翻页有配额惩罚（509 ban 图/临时封 IP）。所以 concurrency=2、delayMs=600、paginationDelayMs=1000 全部放慢：19 个分页页 + 388 个 /s/ 页 ≈ 6~8 分钟，宁可慢也不能炸。detail 连续失败 ≥8 会自动停用（配额被打爆时的保险丝），等一天配额重置再「扫描本页」接着累计。⑥【登记表】hath URL 的 keystamp 在路径里每次都变，但末段原始文件名不变 —— pushedKeyRe 用 ([^/?]+)$ 按文件名登记，重扫不会重推。⑦【exhentai】match 同时覆盖 exhentai.org（同一引擎）；未登录 exhentai 是空白页，gmGet 带浏览器 cookie，登录了就能用。⑧【fallback】/s/ 页偶尔会有『图片加载失败点击重试』的 nl 重载链接（大图/限额时），img[id='img'] 拿不到 src 时会落到 og:image 兜底（实测该页无 og:image，会报『详情页未找到原图』—— 这时手动点开那张图让站点重载，或等配额）。⑨【视频/其他】本规则只匹配 /g/* 相册页；MP4 之类的非图条目 /s/ 页结构不同（videojs），img[id='img'] 不命中会被跳过并计入 detail 失败 —— 大量视频相册不适合本规则。",
+      "resolve": [
+        {
+          "type": "detail",
+          "excludeThumb": true,
+          "selectors": [
+            "img[id='img']@src",
+            "meta[property='og:image']@content"
+          ]
+        }
+      ],
+      "pushedKeyRe": "([^/?]+)$",
+      "concurrency": 2,
+      "delayMs": 600,
+      "paginationDelayMs": 1000
     }
   ]
 }

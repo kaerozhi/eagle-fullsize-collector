@@ -2,7 +2,7 @@
 // @name         Eagle 大图批量收藏
 // @name:en      Eagle Full-Size Collector
 // @namespace    eagle-batch-collector
-// @version      0.8.3
+// @version      0.8.4
 // @description  订阅规则表驱动的原图批量采集：把列表页/瀑布流里的缩略图升级成原图，直推 Eagle 素材库（或替换页面图片，配合 Eagle 官方扩展批量收藏）
 // @author       kaerozhi
 // @license      MIT
@@ -33,7 +33,7 @@
    * ============================================================ */
 
   const NS = 'ebc.';                      // 存储命名空间
-  const VERSION = '0.8.3';
+  const VERSION = '0.8.4';
 
   const DEFAULT_SETTINGS = {
     // 远程订阅规则表 URL（同 AdBlock 订阅）。留空 = 只用内置规则。
@@ -472,6 +472,43 @@
       // image/jpeg —— Eagle 扩展按魔数识别，无碍）。attr 直通，零请求。
       resolve: [{ type: 'attr', selectors: ['img@src'], allowSameThumb: true }],
     },
+    {
+      id: 'ehentai',
+      name: 'E-Hentai 相册（detail 两跳）',
+      enabled: true,
+      match: ['*://*.e-hentai.org/g/*', '*://*.exhentai.org/g/*'],
+      // ★ 条目形态：#gdt 里 <a href="/s/<imgkey>/<gid>-<页号>"> 包一个 **无 <img> 的
+      //   div**（缩略图画在 CSS background 上）—— 所以 collect 需要 allowNoImg，
+      //   itemKey 落在 link（/s/ 链接全局唯一）。分辨率信息也在这页上：
+      //   "Showing 1 - 20 of 388 images"，388 张 / 20 页，分页器是滑动窗口（1..7 +
+      //   跳页 + 20），递归发现能走完。
+      // ★ 解析是 detail 两跳：/s/ 查看页里 <img id="img" src="https://<H@H节点>/h/…
+      //   keystamp=…;xres=org/<原始文件名>.jpg"> —— 原始文件名直接在 URL basename
+      //   里（命名白送）。实测 hath 大图无 Referer 200（1080×1080 JPEG），可直推。
+      // ★ 限速关键：388 张 = 388 个 /s/ 页，每个都要真实抓取（没有条带可收割）。
+      //   e-hentai 对快速翻页有配额惩罚（509）—— delayMs 600 / concurrency 2 /
+      //   paginationDelayMs 1000 全部放慢，宁可几分钟也不要触发封禁。
+      collect: {
+        item: "a[href*='.org/s/']",
+        img: 'img',
+        link: 'self',
+        allowNoImg: true,
+        pagination: { links: "a[href*='?p=']", maxPages: 60 },
+      },
+      resolve: [
+        {
+          type: 'detail',
+          excludeThumb: true,
+          selectors: ["img[id='img']@src", "meta[property='og:image']@content"],
+        },
+      ],
+      // 登记表抽稳定键：hath URL 的 keystamp 在**路径**里（每次扫描都变），
+      // 但末段的原始文件名不变 —— 按文件名登记，重扫不重推。
+      pushedKeyRe: '([^/?]+)$',
+      concurrency: 2,
+      delayMs: 600,
+      paginationDelayMs: 1000,
+    },
   ];
 
   /* ============================================================
@@ -888,15 +925,19 @@
     if (c.item) {
       for (const el of root.querySelectorAll(c.item)) {
         const img = el.tagName === 'IMG' ? el : el.querySelector(imgSel) || (el.matches('img') ? el : null);
-        if (!img) continue;
-        const thumb = pickThumb(img);
+        // allowNoImg：有的站点条目里根本没有 <img> —— 实测 e-hentai 的相册页
+        // <a href="/s/…"> 里是个 div，缩略图画在 CSS background 上。这类条目
+        // thumb 为空，itemKey 落到 link 上（/s/ 链接全局唯一，去重稳）。
+        // 默认仍要求有 img —— 那是「条目链接满地都是」站点的噪音滤网。
+        if (!img && !c.allowNoImg) continue;
+        const thumb = img ? pickThumb(img) : '';
         const externalId = pickExternalId(el);
         const link = pickLink(el, img);
         // 缩略图还没懒加载出来时，只要拿得到 id，后面 pagedata 仍能靠 id 工作
         const key = thumb || externalId || link;
         if (!key || seen.has(key)) continue;
         seen.add(key);
-        out.push({ el, img, thumb, link, externalId, alt: pickAlt(img), pageUrl: baseUrl, baseUrl });
+        out.push({ el, img, thumb, link, externalId, alt: img ? pickAlt(img) : '', pageUrl: baseUrl, baseUrl });
       }
       if (out.length) return out;
       // item 选择器没命中就别死心，退化到全页 img

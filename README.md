@@ -500,6 +500,7 @@ node tests/imagefap-harness.mjs   # 详情条带收获：{id} 定位 + harvestSt
 node tests/erome-harness.mjs      # Erome 相册：attr 直通 + 登记表稳定键，23 项断言
 node tests/xvideos-harness.mjs    # XVideos 相册：link 步骤零请求直通，27 项断言
 node tests/xsnvshen-harness.mjs   # 秀色女神相册：分页 + directPush 警告，23 项断言
+node tests/ehentai-harness.mjs    # E-Hentai 相册：allowNoImg + detail 两跳，25 项断言
 node tests/live-eporner.mjs       # 真实站点端到端：需要能访问 eporner
 node tests/live-naming.mjs        # 真实 Eagle 端到端：需要 Eagle 在跑（会写 3 条测试素材，跑完自动移进回收站）
 ```
@@ -537,6 +538,7 @@ node tests/live-naming.mjs        # 真实 Eagle 端到端：需要 Eagle 在跑
 | 24 | **Erome 相册**（`erome-harness.mjs`，23 项）：`img.img-front` 命中且 `img-back`（同 URL 的悬停副本）与 logo/头像噪音不算数；attr 直通返回 src 本身（站方最大图，灯箱 data-src 同款）；`match` 不误伤用户页/首页；**登记表稳定键**——目录号变了（1141→9999）键不变（`pushedKeyRe` 抽出 `<相册id>/<图id>`），新旧目录号一起被剔、其他站不带 `pushedKeyRe` 仍按整条路径 |
 | 25 | **XVideos 相册**（`xvideos-harness.mjs`，27 项）：条目是 `<a href=原图>`，`link: self` 让条目 link 直接是 full.jpg（缩略图是内层 img）；`link` 步骤零请求直通、每条解析成自己的 full（uuid 全局唯一防串图）、双 CDN 主机原样保留；守卫——href===thumb 默认拒绝（`allowSameThumb` 放开）、非 http/空 link 拒绝；`match` 不误伤视频页与资料页 |
 | 26 | **秀色女神相册**（`xsnvshen-harness.mjs`，23 项）：`img[src*='.com/album/']` 区分内容图与 `thumb_205x308` 封面噪音；protocol-relative src 解析成 https；`?p=` 分页递归走完且编号 0..N 一张不少；src 本身即原图（2400×1600 WebP 伪装 .jpg）attr 直通；**`directPush: false`**——防盗链站（Referer 必须是相册页）直推必死，推送时大声警告、其他站不受影响（结构性钉死 `=== false`） |
+| 27 | **E-Hentai 相册**（`ehentai-harness.mjs`，25 项）：条目无 `<img>`（缩略图画在 CSS background 上）—— **`allowNoImg`** 让 collect 接受纯链接条目、itemKey 落 link；`?p=` 分页走完且页号一张不少；**detail 两跳**解析 /s/ 查看页的 `img[id='img']`（H@H 大图），每条真实抓取一次、互不串图；素材名 = 原始文件名（URL basename 白送）；保守限速三件套（delayMs=600 / concurrency=2 / paginationDelayMs=1000，388 个 /s/ 页不能快）；登记表按文件名登记（keystamp 在路径里会变，`pushedKeyRe` 抽末段）；match 覆盖 exhentai、不误伤首页/论坛 |
 | 17 | **kitty-kats**：`a[href] > img` 把帖子图与头像**都**收进来（4 条），噪音留给 resolve 滤；`link` 是图床的分享页；`itemKey` 互不相同 |
 | 18 | **图床 `host` 步骤（pixhost）**：`t2/thumbs/…` → `img2/images/…`、不再带 `/thumbs/`、结果互不相同；**`t9 → img9`、`t3.pixhost.to → img3.pixhost.to`**（主机号与 tld 都是捕获组，不是写死的 `img2`）；非 pixhost 的缩略图不会被误改 |
 | 18b | **图床 `host` 步骤（imagetwist）**：`img69/th/` → `img69/i/`；**`s10` → `s10`（绝不能猜成 `img10`）**；`img202` → `img202`；已经是 `/i/` 的原图不再改；无关域名不误伤 |
@@ -782,6 +784,7 @@ IMDb 的 `mediaindex` 页面源码只有 50 张，接口里 `total` 是 821。�
 | ImageFap 弹了验证码，之后只解析出一小部分 | 分页步行太快被风控了。v0.8.0 起分页每页之间强制停顿（`paginationDelayMs`，该站 1200ms）、连续 3 次失败或连续 8 页 0 新增就熔断停走。**弹验证码后别急着重扫** —— 越急拉黑越久；等几分钟，已收集的条目还在，点「扫描本页」会接着累计。 |
 | ImageFap 重扫后 Eagle 里多出一串重复 | 旧版按完整 URL 去重，而这种站的图片 URL 每次扫描都换新签名 token —— 同一张图第二次推送拦不住。v0.8.0 起按**图片路径**登记已推送（跨刷新生效），同一张图换新签名也会被认出来跳过。真想整卷重推：换一个 Eagle 收藏目录，或临时把规则禁用再启用。 |
 | xsnvshen（秀色女神）推送「成功」但 Eagle 里一张都没有 | **该站直推必死**：图片防盗链按 Referer 校验、且 Referer 必须是相册页本身（站点首页都不行）。Eagle 服务端下载不带 Referer → CDN 403 → add 返回了 id 但素材永远不落地（实测轮询 30 秒 total=0）。规则已标 `directPush: false`，推送时会大声警告。**正确用法：「替换页面图片」+ Eagle 官方扩展批量收藏** —— 页面声明 `<meta name="referrer" content="always">`，浏览器下载带完整相册页 Referer 能过校验。另：图片本体是 WebP 内容伪装 .jpg 后缀（2400×1600），Eagle 按魔数识别，无碍。 |
+| e-hentai 解析到一半停了 / 弹 509 | **配额被打了**：388 张相册 = 388 个 /s/ 查看页，每张都要真实抓取（没有批量接口）。脚本已放慢（每张间隔 600ms、并发 2），连续失败 ≥8 会自动停用 detail —— 这是保险丝不是故障。509 是当天的图片配额用完，等配额重置（ logged-in 每日重置）再点「扫描本页」会接着累计，已解析的不会重抓。已推送的由登记表拦着，不会重复。 |
 | ImageFap 相册只收到 24 张（明明有几百张） | 每页 24 张，其余在分页里；规则靠 `collect.pagination` 递归走滑动窗口。只收到一页说明订阅没更新到带 `pagination` 的版本，或分页器链接没被 `a[href*='view=']` 认出。 |
 | ImageFap 收的图是别人的（错位） | 详情页条带 24 个 `<li>` 形态完全相同，定位靠 `a[imageid='{id}']`。若 `{id}` 抠错了（缩略图文件名里数字段变了），会拿到邻居的图 —— 检查规则里 `idFromThumb` 的正则是否还匹配当前站点形态。 |
 | Eagle 里出现重复素材，数量少于条目数 | 页面上条目数常多于画廊的实际照片数（实测 eporner：106 个条目 → 85 张照片）。脚本推送前会按原图 URL 去重，日志打 `有 21 个条目与前面的条目指向同一张原图，已跳过`。 |
